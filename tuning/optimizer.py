@@ -36,7 +36,8 @@ from config import (
     OPTUNA_WALK_FORWARD_WINDOWS,
     TAKER_FEE,
     BACKTEST_STEPS,
-    MIN_TRADES_FOR_OPTIMIZATION
+    MIN_TRADES_FOR_OPTIMIZATION,
+    BASE_LEVERAGE
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -168,39 +169,100 @@ class TwoLayerOptimizer:
         # ====================================================================
         logger.info("Baseline 2: Buy&Hold Agent (should match asset return)...")
         env_bh = TradingEnv(data=data_dict, initial_balance=INITIAL_BALANCE)
-        obs, info = env_bh.reset()
+        obs, info = env_bh.reset(options={'ignore_stops': True, 'debug_mode': True})
         
         # Open long position immediately
         initial_price = test_data.iloc[0]['close']
         final_price = test_data.iloc[min(steps, len(test_data)-1)]['close']
         expected_return = (final_price - initial_price) / initial_price
         
-        # Simulate buy and hold
-        for step in range(steps):
-            action = np.array([1.0])  # Long action
+        # CRITICAL: Open position manually at step 0
+        action = np.array([1.0])  # Long action
+        obs, reward, terminated, truncated, info = env_bh.step(
+            action,
+            tft_confidence_15m=1.0,
+            tft_confidence_1h=1.0,
+            tft_confidence_4h=1.0
+        )
+        
+        # Verify position opened
+        if len(env_bh.positions) == 0:
+            logger.error("CRITICAL: Buy&Hold position did not open!")
+            raise RuntimeError("Buy&Hold position failed to open")
+        
+        # Log step 0 (after opening)
+        env_bh._log_baseline_debug(0, is_last=False)
+        
+        # Continue holding (no action changes, position stays open)
+        for step in range(1, steps):
+            action = np.array([1.0])  # Keep long action
             obs, reward, terminated, truncated, info = env_bh.step(
                 action,
-                tft_confidence_15m=1.0,  # High confidence - will trade
+                tft_confidence_15m=1.0,
                 tft_confidence_1h=1.0,
                 tft_confidence_4h=1.0
             )
+            
+            # Log at specific steps
+            if step == 1 or step == 5:
+                env_bh._log_baseline_debug(step, is_last=False)
+            
             if terminated or truncated:
+                logger.warning(f"Buy&Hold terminated early at step {step}")
                 break
+        
+        # CRITICAL: Log last step before closing
+        env_bh._log_baseline_debug(steps - 1, is_last=True)
+        
+        # CRITICAL: Close position at end to realize PnL
+        if len(env_bh.positions) > 0:
+            for coin in list(env_bh.positions.keys()):
+                final_price_for_close = env_bh._get_current_price(coin)
+                env_bh._close_position(coin, "Baseline End", final_price_for_close)
         
         final_value_bh = env_bh.portfolio_value
         return_bh = (final_value_bh - INITIAL_BALANCE) / INITIAL_BALANCE
         
-        # Account for fees (entry + exit if position closed)
-        # Expected return should be approximately: asset_return * leverage - fees
-        # For simplicity, check if return is in reasonable range
-        logger.info(f"  Buy&Hold: Return={return_bh*100:.4f}%, Expected Asset Return={expected_return*100:.4f}%")
+        # CRITICAL FIX: Get actual position_notional used by Buy&Hold
+        # Position notional already includes leverage (margin * leverage)
+        position_notional = 0.0
+        if len(env_bh.trades) > 0:
+            # Get from closed trade
+            position_notional = env_bh.trades[0].size  # size is notional value
+        elif len(env_bh.positions) > 0:
+            # Get from open position (if not closed yet)
+            position = list(env_bh.positions.values())[0]
+            position_notional = position.margin_used * position.leverage
         
-        # VALIDATION: Should be close to asset return (within fees)
-        # Allow 5% deviation for fees and leverage effects
-        if abs(return_bh - expected_return) > 0.05:
+        # CRITICAL FIX: Correct expected return calculation
+        # DO NOT multiply by leverage again (position_notional already includes leverage)
+        # Expected portfolio return = asset_return * (position_notional / initial_balance)
+        position_fraction = position_notional / INITIAL_BALANCE if INITIAL_BALANCE > 0 else 0.0
+        expected_portfolio_return = expected_return * position_fraction
+        
+        # Calculate fees: entry + exit = 2 * TAKER_FEE on notional
+        from config import TAKER_FEE
+        fees_total = 2 * TAKER_FEE * position_notional  # open + close fees
+        fee_impact = fees_total / INITIAL_BALANCE if INITIAL_BALANCE > 0 else 0.0
+        expected_after_fees = expected_portfolio_return - fee_impact
+        
+        logger.info(f"  Buy&Hold: Return={return_bh*100:.4f}%, "
+                   f"Expected Asset Return (unlevered)={expected_return*100:.4f}%, "
+                   f"Position Fraction={position_fraction*100:.2f}%, "
+                   f"Expected Portfolio Return={expected_portfolio_return*100:.4f}%, "
+                   f"Expected After Fees={expected_after_fees*100:.4f}%")
+        
+        # VALIDATION: Should be close to expected portfolio return minus fees
+        # Allow tolerance for slippage and rounding
+        tolerance = 0.005  # 0.5% tolerance
+        expected_min = expected_after_fees - tolerance
+        expected_max = expected_after_fees + tolerance
+        
+        if return_bh < expected_min or return_bh > expected_max:
             error_msg = (
                 f"BASELINE VALIDATION FAILED: Buy&Hold agent returned {return_bh*100:.4f}% "
-                f"(expected ~{expected_return*100:.4f}%). PnL calculation may be incorrect!"
+                f"(expected ~{expected_after_fees*100:.4f}% ± {tolerance*100:.2f}%). "
+                f"Check debug logs above for details."
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)

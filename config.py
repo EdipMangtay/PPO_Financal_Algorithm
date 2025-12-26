@@ -37,11 +37,15 @@ BREAKEVEN_TRIGGER_PCT: float = 1.5  # Move SL to breakeven at 1.5% profit
 AGGRESSIVE_TRAILING_TRIGGER_PCT: float = 5.0  # Tighten trailing at 5.0% profit
 AGGRESSIVE_TRAILING_MULTIPLIER: float = 1.5  # Tightened trailing multiplier
 
-# Trading Fees & Execution Costs
-TAKER_FEE: float = 0.0006  # 0.06% taker fee (TRANSACTION_FEE)
-TRANSACTION_FEE: float = 0.0006  # Alias for clarity
+# Trading Fees & Execution Costs (Binance USDT-M Futures Default)
+TAKER_FEE: float = 0.0004  # 0.04% taker fee (Binance USDT-M default)
+MAKER_FEE: float = 0.0002  # 0.02% maker fee (Binance USDT-M default)
+TRANSACTION_FEE: float = 0.0004  # Default to taker
 SLIPPAGE_PCT: float = 0.0005  # 0.05% slippage per trade (realistic for crypto)
 SPREAD_PCT: float = 0.0002  # 0.02% bid-ask spread (typical for major pairs)
+
+# Funding Rate (default 0, only charge if explicitly enabled)
+FUNDING_RATE: float = 0.0  # Default: no funding charges
 
 # ============================================================================
 # PRODUCTION RISK ENGINE PARAMETERS (CRITICAL - HARD STOPS)
