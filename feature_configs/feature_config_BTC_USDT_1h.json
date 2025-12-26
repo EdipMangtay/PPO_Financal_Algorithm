@@ -2,21 +2,24 @@
   "coin": "BTC/USDT",
   "timeframe": "1h",
   "selected_features": [
-    "RSI",
-    "MACD",
-    "MACD_signal",
-    "MACD_hist",
-    "ATR"
+    "price_change_1",
+    "price_low_20",
+    "price_change_20",
+    "price_change_10",
+    "price_high_1",
+    "price_change_5",
+    "price_high_5",
+    "price_high_20"
   ],
   "indicator_params": {},
-  "num_features": 5,
+  "num_features": 8,
   "performance": {
-    "aggressive_score": -1000.0,
-    "sortino_ratio": 0.0,
-    "sharpe_ratio": 0.0,
-    "total_return": 0.0,
-    "max_drawdown": 0.0,
-    "num_trades": 0,
-    "trades_per_month": 0.0
+    "aggressive_score": 0.0,
+    "sortino_ratio": -50.42586108707063,
+    "sharpe_ratio": -47.39507690456523,
+    "total_return": -0.15075126425262897,
+    "max_drawdown": 0.15075126425262897,
+    "num_trades": 231,
+    "trades_per_month": 16.631999999999998
   }
 }
