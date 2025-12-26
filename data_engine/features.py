@@ -7,14 +7,43 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 import logging
+import traceback
+
+# ====================================================================
+# CRITICAL: Robust pandas-ta import with detailed error reporting
+# ====================================================================
+HAS_PANDAS_TA = False
+ta = None
+IMPORT_ERROR_MSG = None
 
 try:
     import pandas_ta as ta
     HAS_PANDAS_TA = True
-except ImportError:
-    HAS_PANDAS_TA = False
     logger = logging.getLogger(__name__)
-    logger.warning("pandas-ta not available. Some features will be limited. Install with: pip install pandas-ta (requires Python 3.12+)")
+    logger.info("✓ pandas-ta imported successfully")
+except ImportError as e:
+    HAS_PANDAS_TA = False
+    IMPORT_ERROR_MSG = str(e)
+    logger = logging.getLogger(__name__)
+    logger.error(f"✗ pandas-ta import FAILED: {IMPORT_ERROR_MSG}")
+    logger.error(f"   Full traceback:\n{traceback.format_exc()}")
+    # Try to provide helpful guidance
+    if "numpy" in str(e).lower():
+        logger.error("   → This is likely a numpy version compatibility issue.")
+        logger.error("   → Try: pip install 'numpy<2.0' or upgrade pandas-ta")
+except Exception as e:
+    HAS_PANDAS_TA = False
+    IMPORT_ERROR_MSG = str(e)
+    logger = logging.getLogger(__name__)
+    logger.error(f"✗ pandas-ta import FAILED with unexpected error: {IMPORT_ERROR_MSG}")
+    logger.error(f"   Full traceback:\n{traceback.format_exc()}")
+
+# Scipy import (optional)
+try:
+    from scipy import stats
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
 
 logging.basicConfig(level=logging.INFO)
 if 'logger' not in locals():
@@ -27,9 +56,25 @@ class FeatureGenerator:
     Optuna will select which features and their parameters to use.
     """
     
-    def __init__(self):
-        """Initialize feature generator."""
+    def __init__(self, require_pandas_ta: bool = True):
+        """
+        Initialize feature generator.
+        
+        Args:
+            require_pandas_ta: If True, raise RuntimeError if pandas-ta is missing
+        """
         self.feature_pool: Dict[str, List[str]] = {}
+        
+        if require_pandas_ta and not HAS_PANDAS_TA:
+            error_msg = (
+                f"CRITICAL: pandas-ta is required but import failed!\n"
+                f"Error: {IMPORT_ERROR_MSG}\n"
+                f"Please install: pip install pandas-ta\n"
+                f"Or fix numpy compatibility: pip install 'numpy<2.0'"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        
         logger.info("Feature Generator initialized")
     
     def generate_candidate_features(
@@ -38,7 +83,7 @@ class FeatureGenerator:
         include_volume: bool = True
     ) -> pd.DataFrame:
         """
-        Generate massive pool of candidate features.
+        Generate massive pool of candidate features using pd.concat for performance.
         
         Args:
             df: DataFrame with OHLCV data
@@ -66,61 +111,87 @@ class FeatureGenerator:
         logger.info("Generating candidate feature pool...")
         
         # ====================================================================
+        # PERFORMANCE FIX: Use list of DataFrames/Series, concat once at end
+        # ====================================================================
+        new_features: List[pd.DataFrame] = []  # List to collect all new features
+        
+        # ====================================================================
         # 1. LINEAR REGRESSION CHANNELS (The Core)
-        # Includes shorter lengths for high-frequency trading (10, 20, 30)
         # ====================================================================
         logger.info("Calculating Linear Regression Channels...")
-        for length in [10, 20, 30, 50, 100, 200]:  # Added shorter lengths for frequent signals
+        for length in [10, 20, 30, 50, 100, 200]:
             try:
-                # Linear Regression
-                linreg = ta.linreg(df['close'], length=length)
-                df[f'linreg_{length}'] = linreg
+                linreg_cols = {}
                 
-                # Slope
-                slope = ta.slope(df['close'], length=length)
-                df[f'slope_{length}'] = slope
+                if HAS_PANDAS_TA:
+                    linreg = ta.linreg(df['close'], length=length)
+                    slope = ta.slope(df['close'], length=length)
+                else:
+                    # Fallback: Manual linear regression
+                    if HAS_SCIPY:
+                        def calc_linreg(series, window):
+                            result = pd.Series(index=series.index, dtype=float)
+                            for i in range(window-1, len(series)):
+                                y = series.iloc[i-window+1:i+1].values
+                                x = np.arange(len(y))
+                                slope_val, intercept_val, r_val, p_val, std_err = stats.linregress(x, y)
+                                result.iloc[i] = intercept_val + slope_val * (window - 1)
+                            return result
+                        
+                        linreg = calc_linreg(df['close'], length)
+                        slope = df['close'].rolling(window=length).apply(
+                            lambda x: stats.linregress(np.arange(len(x)), x.values)[0] if len(x) == length else np.nan,
+                            raw=False
+                        )
+                    else:
+                        # Very simple fallback: use SMA
+                        linreg = df['close'].rolling(window=length).mean()
+                        slope = df['close'].diff(length) / length
                 
-                # Intercept (approximate from linreg and slope)
-                if f'linreg_{length}' in df.columns and f'slope_{length}' in df.columns:
-                    # Intercept = linreg - slope * (length/2)
-                    df[f'intercept_{length}'] = df[f'linreg_{length}'] - df[f'slope_{length}'] * (length / 2)
+                linreg_cols[f'linreg_{length}'] = linreg
+                linreg_cols[f'slope_{length}'] = slope
                 
-                # R-squared (coefficient of determination)
-                # Approximate using correlation squared
-                df[f'rsquared_{length}'] = df['close'].rolling(window=length).corr(
-                    df[f'linreg_{length}']
-                ) ** 2
+                # Intercept
+                linreg_cols[f'intercept_{length}'] = linreg - slope * (length / 2)
                 
-                # Upper and Lower Channels (using ATR for channel width)
-                atr = ta.atr(df['high'], df['low'], df['close'], length=14)
-                df[f'linreg_upper_{length}'] = df[f'linreg_{length}'] + (atr * 2)
-                df[f'linreg_lower_{length}'] = df[f'linreg_{length}'] - (atr * 2)
+                # R-squared
+                linreg_cols[f'rsquared_{length}'] = df['close'].rolling(window=length).corr(linreg) ** 2
                 
-                # Distance from channels (normalized)
-                df[f'dist_upper_{length}'] = (df['close'] - df[f'linreg_upper_{length}']) / df['close']
-                df[f'dist_lower_{length}'] = (df['close'] - df[f'linreg_lower_{length}']) / df['close']
-                df[f'dist_linreg_{length}'] = (df['close'] - df[f'linreg_{length}']) / df['close']
+                # ATR for channels
+                if HAS_PANDAS_TA:
+                    atr = ta.atr(df['high'], df['low'], df['close'], length=14)
+                else:
+                    from data.loader import TechnicalIndicators
+                    atr = TechnicalIndicators.calculate_atr(df['high'], df['low'], df['close'], period=14)
                 
-                # Mid-Line Crossovers (for inner channel trading)
-                # Price crossing above/below the linear regression line
-                df[f'cross_above_linreg_{length}'] = (df['close'] > df[f'linreg_{length}']).astype(int)
-                df[f'cross_below_linreg_{length}'] = (df['close'] < df[f'linreg_{length}']).astype(int)
+                linreg_cols[f'linreg_upper_{length}'] = linreg + (atr * 2)
+                linreg_cols[f'linreg_lower_{length}'] = linreg - (atr * 2)
                 
-                # Momentum indicator: Rate of change of distance from mid-line
-                df[f'momentum_linreg_{length}'] = df[f'dist_linreg_{length}'].diff()
+                # Distances
+                linreg_cols[f'dist_upper_{length}'] = (df['close'] - linreg_cols[f'linreg_upper_{length}']) / df['close']
+                linreg_cols[f'dist_lower_{length}'] = (df['close'] - linreg_cols[f'linreg_lower_{length}']) / df['close']
+                linreg_cols[f'dist_linreg_{length}'] = (df['close'] - linreg) / df['close']
                 
-                # Strong momentum signal: Price moving away from mid-line with positive slope
-                if f'slope_{length}' in df.columns:
-                    df[f'strong_momentum_long_{length}'] = (
-                        (df[f'cross_above_linreg_{length}'] == 1) & 
-                        (df[f'slope_{length}'] > 0) &
-                        (df[f'momentum_linreg_{length}'] > 0)
-                    ).astype(int)
-                    df[f'strong_momentum_short_{length}'] = (
-                        (df[f'cross_below_linreg_{length}'] == 1) & 
-                        (df[f'slope_{length}'] < 0) &
-                        (df[f'momentum_linreg_{length}'] < 0)
-                    ).astype(int)
+                # Crossovers
+                linreg_cols[f'cross_above_linreg_{length}'] = (df['close'] > linreg).astype(int)
+                linreg_cols[f'cross_below_linreg_{length}'] = (df['close'] < linreg).astype(int)
+                
+                # Momentum
+                linreg_cols[f'momentum_linreg_{length}'] = linreg_cols[f'dist_linreg_{length}'].diff()
+                
+                # Strong momentum signals
+                linreg_cols[f'strong_momentum_long_{length}'] = (
+                    (linreg_cols[f'cross_above_linreg_{length}'] == 1) & 
+                    (slope > 0) &
+                    (linreg_cols[f'momentum_linreg_{length}'] > 0)
+                ).astype(int)
+                linreg_cols[f'strong_momentum_short_{length}'] = (
+                    (linreg_cols[f'cross_below_linreg_{length}'] == 1) & 
+                    (slope < 0) &
+                    (linreg_cols[f'momentum_linreg_{length}'] < 0)
+                ).astype(int)
+                
+                new_features.append(pd.DataFrame(linreg_cols, index=df.index))
                 
             except Exception as e:
                 logger.warning(f"Error calculating LinReg for length {length}: {e}")
@@ -133,23 +204,24 @@ class FeatureGenerator:
         
         for period in oscillator_periods:
             try:
-                # RSI
-                rsi = ta.rsi(df['close'], length=period)
-                df[f'RSI_{period}'] = rsi
+                osc_cols = {}
                 
-                # Stochastic
-                stoch = ta.stoch(df['high'], df['low'], df['close'], k=period, d=3, smooth_k=3)
-                if isinstance(stoch, pd.DataFrame):
-                    df[f'STOCH_k_{period}'] = stoch.iloc[:, 0] if len(stoch.columns) > 0 else 0
-                    df[f'STOCH_d_{period}'] = stoch.iloc[:, 1] if len(stoch.columns) > 1 else 0
+                if HAS_PANDAS_TA:
+                    osc_cols[f'RSI_{period}'] = ta.rsi(df['close'], length=period)
+                    
+                    stoch = ta.stoch(df['high'], df['low'], df['close'], k=period, d=3, smooth_k=3)
+                    if isinstance(stoch, pd.DataFrame):
+                        osc_cols[f'STOCH_k_{period}'] = stoch.iloc[:, 0] if len(stoch.columns) > 0 else pd.Series(0, index=df.index)
+                        osc_cols[f'STOCH_d_{period}'] = stoch.iloc[:, 1] if len(stoch.columns) > 1 else pd.Series(0, index=df.index)
+                    
+                    osc_cols[f'CCI_{period}'] = ta.cci(df['high'], df['low'], df['close'], length=period)
+                    osc_cols[f'WilliamsR_{period}'] = ta.willr(df['high'], df['low'], df['close'], length=period)
+                else:
+                    # Fallback: Use TechnicalIndicators
+                    from data.loader import TechnicalIndicators
+                    osc_cols[f'RSI_{period}'] = TechnicalIndicators.calculate_rsi(df['close'], period=period)
                 
-                # CCI (Commodity Channel Index)
-                cci = ta.cci(df['high'], df['low'], df['close'], length=period)
-                df[f'CCI_{period}'] = cci
-                
-                # Williams %R
-                willr = ta.willr(df['high'], df['low'], df['close'], length=period)
-                df[f'WilliamsR_{period}'] = willr
+                new_features.append(pd.DataFrame(osc_cols, index=df.index))
                 
             except Exception as e:
                 logger.warning(f"Error calculating oscillators for period {period}: {e}")
@@ -159,46 +231,74 @@ class FeatureGenerator:
         # ====================================================================
         logger.info("Calculating Trend Indicators...")
         
-        # EMA Ribbons (multiple EMAs)
+        # EMA Ribbons
+        ema_cols = {}
         for length in [8, 13, 21, 34, 55]:
             try:
-                ema = ta.ema(df['close'], length=length)
-                df[f'EMA_{length}'] = ema
+                if HAS_PANDAS_TA:
+                    ema_cols[f'EMA_{length}'] = ta.ema(df['close'], length=length)
+                else:
+                    ema_cols[f'EMA_{length}'] = df['close'].ewm(span=length, adjust=False).mean()
             except Exception as e:
                 logger.warning(f"Error calculating EMA_{length}: {e}")
+        
+        if ema_cols:
+            new_features.append(pd.DataFrame(ema_cols, index=df.index))
         
         # SuperTrend
         for period in [10, 14, 21]:
             for multiplier in [2.0, 3.0]:
                 try:
-                    supertrend = ta.supertrend(df['high'], df['low'], df['close'], 
-                                             period=period, multiplier=multiplier)
-                    if isinstance(supertrend, pd.DataFrame):
-                        df[f'SuperTrend_{period}_{multiplier}'] = supertrend.iloc[:, 0] if len(supertrend.columns) > 0 else 0
+                    if HAS_PANDAS_TA:
+                        supertrend = ta.supertrend(df['high'], df['low'], df['close'], 
+                                                   period=period, multiplier=multiplier)
+                        if isinstance(supertrend, pd.DataFrame):
+                            st_cols = {f'SuperTrend_{period}_{multiplier}': supertrend.iloc[:, 0] if len(supertrend.columns) > 0 else pd.Series(0, index=df.index)}
+                            new_features.append(pd.DataFrame(st_cols, index=df.index))
                 except Exception as e:
                     logger.warning(f"Error calculating SuperTrend: {e}")
         
-        # ADX (Average Directional Index)
+        # ADX
         for period in [14, 21]:
             try:
-                adx = ta.adx(df['high'], df['low'], df['close'], length=period)
-                if isinstance(adx, pd.DataFrame):
-                    df[f'ADX_{period}'] = adx.iloc[:, 0] if len(adx.columns) > 0 else 0
-                    df[f'ADX_plus_{period}'] = adx.iloc[:, 1] if len(adx.columns) > 1 else 0
-                    df[f'ADX_minus_{period}'] = adx.iloc[:, 2] if len(adx.columns) > 2 else 0
+                if HAS_PANDAS_TA:
+                    adx = ta.adx(df['high'], df['low'], df['close'], length=period)
+                    if isinstance(adx, pd.DataFrame):
+                        adx_cols = {
+                            f'ADX_{period}': adx.iloc[:, 0] if len(adx.columns) > 0 else pd.Series(0, index=df.index),
+                            f'ADX_plus_{period}': adx.iloc[:, 1] if len(adx.columns) > 1 else pd.Series(0, index=df.index),
+                            f'ADX_minus_{period}': adx.iloc[:, 2] if len(adx.columns) > 2 else pd.Series(0, index=df.index)
+                        }
+                        new_features.append(pd.DataFrame(adx_cols, index=df.index))
             except Exception as e:
                 logger.warning(f"Error calculating ADX: {e}")
         
-        # MACD (multiple periods)
+        # MACD
         for fast in [8, 12]:
             for slow in [21, 26]:
                 for signal in [7, 9]:
                     try:
-                        macd = ta.macd(df['close'], fast=fast, slow=slow, signal=signal)
+                        if HAS_PANDAS_TA:
+                            macd = ta.macd(df['close'], fast=fast, slow=slow, signal=signal)
+                        else:
+                            ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
+                            ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
+                            macd_line = ema_fast - ema_slow
+                            signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+                            hist = macd_line - signal_line
+                            macd = pd.DataFrame({
+                                'MACD': macd_line,
+                                'Signal': signal_line,
+                                'Hist': hist
+                            }, index=df.index)
+                        
                         if isinstance(macd, pd.DataFrame):
-                            df[f'MACD_{fast}_{slow}_{signal}'] = macd.iloc[:, 0] if len(macd.columns) > 0 else 0
-                            df[f'MACD_signal_{fast}_{slow}_{signal}'] = macd.iloc[:, 1] if len(macd.columns) > 1 else 0
-                            df[f'MACD_hist_{fast}_{slow}_{signal}'] = macd.iloc[:, 2] if len(macd.columns) > 2 else 0
+                            macd_cols = {
+                                f'MACD_{fast}_{slow}_{signal}': macd.iloc[:, 0] if len(macd.columns) > 0 else pd.Series(0, index=df.index),
+                                f'MACD_signal_{fast}_{slow}_{signal}': macd.iloc[:, 1] if len(macd.columns) > 1 else pd.Series(0, index=df.index),
+                                f'MACD_hist_{fast}_{slow}_{signal}': macd.iloc[:, 2] if len(macd.columns) > 2 else pd.Series(0, index=df.index)
+                            }
+                            new_features.append(pd.DataFrame(macd_cols, index=df.index))
                     except Exception as e:
                         logger.warning(f"Error calculating MACD: {e}")
         
@@ -207,26 +307,50 @@ class FeatureGenerator:
         # ====================================================================
         logger.info("Calculating Volatility Indicators...")
         
-        # ATR (multiple periods)
+        # ATR
+        atr_cols = {}
         for period in [7, 14, 21]:
             try:
-                atr = ta.atr(df['high'], df['low'], df['close'], length=period)
-                df[f'ATR_{period}'] = atr
-                # Normalized ATR
-                df[f'ATR_norm_{period}'] = atr / df['close']
+                if HAS_PANDAS_TA:
+                    atr = ta.atr(df['high'], df['low'], df['close'], length=period)
+                else:
+                    from data.loader import TechnicalIndicators
+                    atr = TechnicalIndicators.calculate_atr(df['high'], df['low'], df['close'], period=period)
+                
+                atr_cols[f'ATR_{period}'] = atr
+                atr_cols[f'ATR_norm_{period}'] = atr / df['close']
             except Exception as e:
                 logger.warning(f"Error calculating ATR_{period}: {e}")
         
-        # Bollinger Bands (multiple periods and std devs)
+        if atr_cols:
+            new_features.append(pd.DataFrame(atr_cols, index=df.index))
+        
+        # Bollinger Bands
         for period in [20, 21]:
             for std in [2, 2.5]:
                 try:
-                    bb = ta.bbands(df['close'], length=period, std=std)
+                    if HAS_PANDAS_TA:
+                        bb = ta.bbands(df['close'], length=period, std=std)
+                    else:
+                        sma = df['close'].rolling(window=period).mean()
+                        std_dev = df['close'].rolling(window=period).std()
+                        bb = pd.DataFrame({
+                            'BBU': sma + (std_dev * std),
+                            'BBM': sma,
+                            'BBL': sma - (std_dev * std)
+                        }, index=df.index)
+                    
                     if isinstance(bb, pd.DataFrame):
-                        df[f'BB_upper_{period}_{std}'] = bb.iloc[:, 0] if len(bb.columns) > 0 else 0
-                        df[f'BB_middle_{period}_{std}'] = bb.iloc[:, 1] if len(bb.columns) > 1 else 0
-                        df[f'BB_lower_{period}_{std}'] = bb.iloc[:, 2] if len(bb.columns) > 2 else 0
-                        df[f'BB_width_{period}_{std}'] = (bb.iloc[:, 0] - bb.iloc[:, 2]) / bb.iloc[:, 1] if len(bb.columns) > 1 else 0
+                        bb_cols = {
+                            f'BB_upper_{period}_{std}': bb.iloc[:, 0] if len(bb.columns) > 0 else pd.Series(0, index=df.index),
+                            f'BB_middle_{period}_{std}': bb.iloc[:, 1] if len(bb.columns) > 1 else pd.Series(0, index=df.index),
+                            f'BB_lower_{period}_{std}': bb.iloc[:, 2] if len(bb.columns) > 2 else pd.Series(0, index=df.index)
+                        }
+                        bb_cols[f'BB_width_{period}_{std}'] = (
+                            (bb_cols[f'BB_upper_{period}_{std}'] - bb_cols[f'BB_lower_{period}_{std}']) / 
+                            bb_cols[f'BB_middle_{period}_{std}'].replace(0, np.nan)
+                        ).fillna(0)
+                        new_features.append(pd.DataFrame(bb_cols, index=df.index))
                 except Exception as e:
                     logger.warning(f"Error calculating Bollinger Bands: {e}")
         
@@ -234,73 +358,102 @@ class FeatureGenerator:
         for period in [20, 21]:
             for multiplier in [2.0, 2.5]:
                 try:
-                    kc = ta.kc(df['high'], df['low'], df['close'], length=period, multiplier=multiplier)
-                    if isinstance(kc, pd.DataFrame):
-                        df[f'KC_upper_{period}_{multiplier}'] = kc.iloc[:, 0] if len(kc.columns) > 0 else 0
-                        df[f'KC_middle_{period}_{multiplier}'] = kc.iloc[:, 1] if len(kc.columns) > 1 else 0
-                        df[f'KC_lower_{period}_{multiplier}'] = kc.iloc[:, 2] if len(kc.columns) > 2 else 0
+                    if HAS_PANDAS_TA:
+                        kc = ta.kc(df['high'], df['low'], df['close'], length=period, multiplier=multiplier)
+                        if isinstance(kc, pd.DataFrame):
+                            kc_cols = {
+                                f'KC_upper_{period}_{multiplier}': kc.iloc[:, 0] if len(kc.columns) > 0 else pd.Series(0, index=df.index),
+                                f'KC_middle_{period}_{multiplier}': kc.iloc[:, 1] if len(kc.columns) > 1 else pd.Series(0, index=df.index),
+                                f'KC_lower_{period}_{multiplier}': kc.iloc[:, 2] if len(kc.columns) > 2 else pd.Series(0, index=df.index)
+                            }
+                            new_features.append(pd.DataFrame(kc_cols, index=df.index))
                 except Exception as e:
                     logger.warning(f"Error calculating Keltner Channels: {e}")
         
         # ====================================================================
-        # 5. VOLUME INDICATORS (if volume available)
+        # 5. VOLUME INDICATORS
         # ====================================================================
         if include_volume and 'volume' in df.columns:
             logger.info("Calculating Volume Indicators...")
             
-            # OBV (On-Balance Volume)
+            vol_cols = {}
+            
+            # OBV
             try:
-                obv = ta.obv(df['close'], df['volume'])
-                df['OBV'] = obv
-                # OBV Rate of Change
-                df['OBV_ROC'] = obv.pct_change(periods=14)
+                if HAS_PANDAS_TA:
+                    obv = ta.obv(df['close'], df['volume'])
+                else:
+                    obv = (df['volume'] * np.sign(df['close'].diff())).cumsum()
+                
+                vol_cols['OBV'] = obv
+                vol_cols['OBV_ROC'] = obv.pct_change(periods=14)
             except Exception as e:
                 logger.warning(f"Error calculating OBV: {e}")
             
-            # MFI (Money Flow Index)
+            # MFI
             for period in [14, 21]:
                 try:
-                    mfi = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=period)
-                    df[f'MFI_{period}'] = mfi
+                    if HAS_PANDAS_TA:
+                        vol_cols[f'MFI_{period}'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=period)
                 except Exception as e:
                     logger.warning(f"Error calculating MFI: {e}")
             
-            # VWAP (Volume Weighted Average Price)
+            # VWAP
             try:
-                vwap = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
-                df['VWAP'] = vwap
-                # Distance from VWAP
-                df['dist_VWAP'] = (df['close'] - vwap) / vwap
+                if HAS_PANDAS_TA:
+                    vwap = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
+                else:
+                    typical_price = (df['high'] + df['low'] + df['close']) / 3
+                    vwap = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
+                
+                vol_cols['VWAP'] = vwap
+                vol_cols['dist_VWAP'] = (df['close'] - vwap) / vwap.replace(0, np.nan)
             except Exception as e:
                 logger.warning(f"Error calculating VWAP: {e}")
             
-            # Volume MA and ratios
+            # Volume MA
             for period in [20, 50]:
                 try:
-                    vol_ma = ta.sma(df['volume'], length=period)
-                    df[f'Volume_MA_{period}'] = vol_ma
-                    df[f'Volume_Ratio_{period}'] = df['volume'] / vol_ma
+                    if HAS_PANDAS_TA:
+                        vol_ma = ta.sma(df['volume'], length=period)
+                    else:
+                        vol_ma = df['volume'].rolling(window=period).mean()
+                    
+                    vol_cols[f'Volume_MA_{period}'] = vol_ma
+                    vol_cols[f'Volume_Ratio_{period}'] = df['volume'] / vol_ma.replace(0, np.nan)
                 except Exception as e:
                     logger.warning(f"Error calculating Volume MA: {e}")
+            
+            if vol_cols:
+                new_features.append(pd.DataFrame(vol_cols, index=df.index))
         
         # ====================================================================
         # 6. PRICE-BASED FEATURES
         # ====================================================================
         logger.info("Calculating Price-Based Features...")
         
-        # Price changes
+        price_cols = {}
         for period in [1, 5, 10, 20]:
-            df[f'price_change_{period}'] = df['close'].pct_change(periods=period)
-            df[f'price_high_{period}'] = df['high'].rolling(window=period).max() / df['close'] - 1
-            df[f'price_low_{period}'] = df['low'].rolling(window=period).min() / df['close'] - 1
+            price_cols[f'price_change_{period}'] = df['close'].pct_change(periods=period)
+            price_cols[f'price_high_{period}'] = df['high'].rolling(window=period).max() / df['close'] - 1
+            price_cols[f'price_low_{period}'] = df['low'].rolling(window=period).min() / df['close'] - 1
         
-        # Fill NaN values
+        if price_cols:
+            new_features.append(pd.DataFrame(price_cols, index=df.index))
+        
+        # ====================================================================
+        # PERFORMANCE FIX: Single concat operation
+        # ====================================================================
+        if new_features:
+            logger.info(f"Concatenating {len(new_features)} feature DataFrames...")
+            df = pd.concat([df] + new_features, axis=1)
+        
+        # Fill NaN and inf values
         df = df.bfill().fillna(0)
-        
-        # Replace inf values
         df = df.replace([np.inf, -np.inf], 0)
         
-        logger.info(f"Generated {len([c for c in df.columns if c not in ['open', 'high', 'low', 'close', 'volume', 'timestamp']])} candidate features")
+        feature_count = len([c for c in df.columns if c not in ['open', 'high', 'low', 'close', 'volume', 'timestamp']])
+        logger.info(f"Generated {feature_count} candidate features")
         
         return df
     
@@ -321,25 +474,14 @@ class FeatureGenerator:
         """
         Select and calculate only the features specified in the config.
         Used during live trading after Optuna optimization.
-        
-        Args:
-            df: Raw OHLCV DataFrame
-            feature_config: Dictionary with feature names and their parameters
-        
-        Returns:
-            DataFrame with only selected features
         """
-        # This would be called during live trading
-        # For now, we'll generate all features and then filter
         df_full = self.generate_candidate_features(df)
         
-        # Select only features in config
         selected_features = feature_config.get('selected_features', [])
         base_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp']
         if 'timestamp' in df_full.columns:
             base_cols.append('timestamp')
         
-        # Keep base columns + selected features
         cols_to_keep = base_cols + [f for f in selected_features if f in df_full.columns]
         
         return df_full[cols_to_keep]
@@ -347,7 +489,7 @@ class FeatureGenerator:
 
 def generate_candidate_features(df: pd.DataFrame) -> pd.DataFrame:
     """Convenience function to generate candidate features."""
-    generator = FeatureGenerator()
+    generator = FeatureGenerator(require_pandas_ta=False)  # Don't require for backward compat
     return generator.generate_candidate_features(df)
 
 
@@ -355,7 +497,6 @@ if __name__ == "__main__":
     # Test feature generation
     import pandas as pd
     
-    # Create sample data
     dates = pd.date_range('2023-01-01', periods=500, freq='15min')
     sample_df = pd.DataFrame({
         'timestamp': dates,
@@ -366,10 +507,9 @@ if __name__ == "__main__":
         'volume': np.random.randint(1000, 10000, 500)
     })
     
-    generator = FeatureGenerator()
+    generator = FeatureGenerator(require_pandas_ta=False)
     features_df = generator.generate_candidate_features(sample_df)
     
     print(f"Original columns: {len(sample_df.columns)}")
     print(f"Features generated: {len(features_df.columns)}")
-    print(f"Feature list: {generator.get_feature_list(features_df)[:10]}...")  # Show first 10
-
+    print(f"Feature list: {generator.get_feature_list(features_df)[:10]}...")

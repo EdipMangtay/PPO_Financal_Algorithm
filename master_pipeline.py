@@ -3,10 +3,23 @@ MASTER PIPELINE - Tek Komutla Tüm Süreç
 Veri İndirme → Optuna Optimizasyon → Eğitim → Backtest → Detaylı Rapor
 """
 
+# ====================================================================
+# CRITICAL: Numpy compatibility patch for pandas-ta (Python 3.13)
+# ====================================================================
+import numpy as np
+# Monkey patch for pandas-ta compatibility with numpy 2.x
+if not hasattr(np, 'float_'):
+    np.float_ = np.float64
+if not hasattr(np, 'bool_'):
+    try:
+        np.bool_ = np.bool
+    except AttributeError:
+        # numpy 2.0+ removed np.bool, use bool instead
+        np.bool_ = bool
+
 import asyncio
 import json
 import pandas as pd
-import numpy as np
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional

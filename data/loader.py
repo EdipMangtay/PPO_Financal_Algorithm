@@ -244,15 +244,17 @@ class DataLoader:
         self, 
         days: int = 7, 
         timeframe: str = SCALP_TIMEFRAME,
-        coins: Optional[List[str]] = None
+        coins: Optional[List[str]] = None,
+        fetch_all_timeframes: bool = True
     ) -> Dict[str, pd.DataFrame]:
         """
         Fetch recent data for all coins with BTC/USDT context injection.
         
         Args:
             days: Number of days to fetch
-            timeframe: Candle timeframe
+            timeframe: Primary candle timeframe
             coins: List of coins to fetch (defaults to TOP_20_COINS)
+            fetch_all_timeframes: If True, fetch 15m, 1h, and 4h data before optimization
         
         Returns:
             Dictionary mapping coin symbols to dataframes with context features
@@ -260,7 +262,54 @@ class DataLoader:
         if coins is None:
             coins = TOP_20_COINS
         
-        logger.info(f"Fetching {days} days of {timeframe} data for {len(coins)} coins...")
+        # ====================================================================
+        # CRITICAL FIX: Download all timeframes BEFORE optimization
+        # ====================================================================
+        if fetch_all_timeframes:
+            logger.info("=" * 60)
+            logger.info("STEP 1: Downloading ALL timeframes (15m, 1h, 4h)")
+            logger.info("=" * 60)
+            
+            timeframes_to_fetch = ['15m', '1h', '4h']
+            for tf in timeframes_to_fetch:
+                logger.info(f"\nFetching {days} days of {tf} data for {len(coins)} coins...")
+                
+                # Calculate since timestamp
+                since_dt = datetime.utcnow() - timedelta(days=days)
+                since_ms = int(since_dt.timestamp() * 1000)
+                
+                # Fetch BTC context data for this timeframe
+                logger.info(f"Fetching BTC context data for {tf}...")
+                btc_df = await self._fetch_btc_data(tf, limit=1000)
+                
+                # Fetch USDT dominance
+                if tf == '15m':  # Only fetch once
+                    logger.info("Fetching USDT dominance...")
+                    usdt_dom = await self._fetch_usdt_dominance()
+                
+                # Fetch all coin data for this timeframe
+                for coin in coins:
+                    logger.info(f"Fetching {coin} {tf}...")
+                    coin_df = await self._fetch_ohlcv(coin, tf, since=since_ms, limit=1000)
+                    
+                    if not coin_df.empty:
+                        # Add technical indicators
+                        coin_df = self._add_technical_indicators(coin_df)
+                        
+                        # CRITICAL: Inject BTC and USDT dominance
+                        coin_df = self._inject_context_features(coin_df, btc_df, usdt_dom)
+                        
+                        # Save to disk
+                        save_path = self.data_dir / f"{coin.replace('/', '_')}_{tf}.parquet"
+                        coin_df.to_parquet(save_path)
+                        logger.info(f"✓ Saved {coin} {tf} data to {save_path}")
+            
+            logger.info("=" * 60)
+            logger.info("✓ All timeframes downloaded successfully!")
+            logger.info("=" * 60)
+        
+        # Now fetch the primary timeframe data for return
+        logger.info(f"\nFetching {days} days of {timeframe} data for {len(coins)} coins...")
         
         # Calculate since timestamp
         since_dt = datetime.utcnow() - timedelta(days=days)
