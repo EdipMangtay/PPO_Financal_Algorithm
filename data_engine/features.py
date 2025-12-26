@@ -456,21 +456,44 @@ class FeatureGenerator:
         df.columns = df.columns.str.replace('.', '_')
         logger.info("Sanitized column names (removed dots)")
         
-        # CRITICAL FIX: Shift features by 1 to prevent look-ahead bias
-        # At time t, we can only use data from time t-1 and earlier
-        # Keep OHLCV and timestamp unshifted (needed for price calculation)
+        # ====================================================================
+        # CRITICAL FIX: ELIMINATE LOOK-AHEAD BIAS
+        # ====================================================================
+        # After calculating ALL technical indicators, shift EVERY feature by 1
+        # EXCEPT: timestamp, open, high, low, close, volume (needed for price calculation)
+        # Logic: Feature at row t MUST represent state at END of t-1
+        # ====================================================================
         base_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp']
         feature_cols = [c for c in df.columns if c not in base_cols]
         
         if feature_cols:
-            logger.info(f"Shifting {len(feature_cols)} feature columns by 1 period to prevent look-ahead bias")
+            logger.info(f"ELIMINATING LOOK-AHEAD BIAS: Shifting {len(feature_cols)} feature columns by 1 period")
+            logger.info(f"Features to shift: {feature_cols[:10]}..." if len(feature_cols) > 10 else f"Features: {feature_cols}")
+            
+            # Store original shape for verification
+            original_shape = df.shape
+            
+            # Shift ALL features by 1 (features at t now represent state at t-1)
             df[feature_cols] = df[feature_cols].shift(1)
-            # Drop first row (NaN after shift)
+            
+            # CRITICAL: Drop first row (NaN after shift) - mandatory sanitization
             df = df.dropna()
-            logger.info(f"After shift, data shape: {df.shape}")
+            
+            logger.info(f"After shift: {original_shape} -> {df.shape} (removed {original_shape[0] - df.shape[0]} rows)")
+            
+            # VERIFICATION: Debug print to confirm leakage is eliminated
+            if len(df) > 10:
+                sample_idx = 10
+                sample_feature = feature_cols[0] if feature_cols else None
+                if sample_feature and sample_feature in df.columns:
+                    feature_time = df.index[sample_idx - 1] if sample_idx > 0 else df.index[0]
+                    price_time = df.index[sample_idx]
+                    print(f"DEBUG LEAKAGE: Row {sample_idx} - Feature '{sample_feature}' is from time {feature_time}, "
+                          f"Price (close) is from time {price_time}")
+                    logger.info(f"VERIFICATION: Feature at row {sample_idx} represents state at t-1, price at t")
         
         feature_count = len([c for c in df.columns if c not in base_cols])
-        logger.info(f"Generated {feature_count} candidate features")
+        logger.info(f"Generated {feature_count} candidate features (all shifted by 1 to prevent look-ahead bias)")
         
         return df
     

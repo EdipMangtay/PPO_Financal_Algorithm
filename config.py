@@ -37,8 +37,10 @@ BREAKEVEN_TRIGGER_PCT: float = 1.5  # Move SL to breakeven at 1.5% profit
 AGGRESSIVE_TRAILING_TRIGGER_PCT: float = 5.0  # Tighten trailing at 5.0% profit
 AGGRESSIVE_TRAILING_MULTIPLIER: float = 1.5  # Tightened trailing multiplier
 
-# Trading Fees
+# Trading Fees & Execution Costs
 TAKER_FEE: float = 0.0006  # 0.06% taker fee
+SLIPPAGE_PCT: float = 0.0005  # 0.05% slippage per trade (realistic for crypto)
+SPREAD_PCT: float = 0.0002  # 0.02% bid-ask spread (typical for major pairs)
 
 # ============================================================================
 # MODEL PARAMETERS
@@ -114,6 +116,11 @@ RETRAIN_LOOKBACK_DAYS: int = 7
 # Optuna Optimization
 OPTUNA_N_TRIALS: int = 50
 OPTUNA_TIMEOUT_SECONDS: int = 3600  # 1 hour
+OPTUNA_TRAIN_VAL_SPLIT: float = 0.7  # 70% train, 30% validation (walk-forward)
+OPTUNA_WALK_FORWARD_WINDOWS: int = 3  # Number of walk-forward windows
+
+# Reproducibility
+RANDOM_SEED: int = 42  # Global seed for reproducibility
 
 # ============================================================================
 # ENVIRONMENT PARAMETERS

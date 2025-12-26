@@ -46,9 +46,13 @@ class TFTModel:
         attention_head_size: int = TFT_ATTENTION_HEAD_SIZE,
         dropout: float = TFT_DROPOUT,
         learning_rate: float = 1e-3,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device: Optional[str] = None
     ):
-        """Initialize TFT model."""
+        """
+        Initialize TFT model.
+        
+        CRITICAL: Properly detects and uses GPU if available.
+        """
         self.prediction_horizon = prediction_horizon
         self.max_encoder_length = max_encoder_length
         self.max_decoder_length = max_decoder_length
@@ -56,7 +60,36 @@ class TFTModel:
         self.attention_head_size = attention_head_size
         self.dropout = dropout
         self.learning_rate = learning_rate
-        self.device = device
+        
+        # ====================================================================
+        # CRITICAL FIX: GPU Detection and Selection
+        # ====================================================================
+        if device is None:
+            # Auto-detect GPU
+            if torch.cuda.is_available():
+                self.device = 'cuda'
+                # Print GPU diagnostics
+                print(f"GPU DIAGNOSTICS:")
+                print(f"  - PyTorch version: {torch.__version__}")
+                print(f"  - CUDA available: {torch.cuda.is_available()}")
+                print(f"  - CUDA device name: {torch.cuda.get_device_name(0)}")
+                print(f"  - CUDA device count: {torch.cuda.device_count()}")
+                print(f"  - Current device: {torch.cuda.current_device()}")
+                if hasattr(torch.cuda, 'get_device_capability'):
+                    capability = torch.cuda.get_device_capability(0)
+                    print(f"  - Compute capability: {capability[0]}.{capability[1]}")
+                print(f"  - Selected accelerator: GPU (cuda:0)")
+            else:
+                self.device = 'cpu'
+                print(f"GPU DIAGNOSTICS:")
+                print(f"  - PyTorch version: {torch.__version__}")
+                print(f"  - CUDA available: False")
+                print(f"  - Selected accelerator: CPU")
+        else:
+            self.device = device
+            if device == 'cuda' and not torch.cuda.is_available():
+                logger.warning(f"CUDA requested but not available. Falling back to CPU.")
+                self.device = 'cpu'
         
         self.model: Optional[TemporalFusionTransformer] = None
         self.training_data: Optional[TimeSeriesDataSet] = None
@@ -64,7 +97,7 @@ class TFTModel:
         self.time_varying_known_reals: List[str] = []
         self.time_varying_unknown_reals: List[str] = []
         
-        logger.info(f"TFT Model initialized on {device}")
+        logger.info(f"TFT Model initialized on {self.device}")
     
     def _prepare_dataframe(
         self, 
@@ -115,11 +148,87 @@ class TFTModel:
         data_dict: Dict[str, pd.DataFrame],
         target: str = 'close'
     ) -> TimeSeriesDataSet:
-        """Create TimeSeriesDataSet from coin data dictionary."""
+        """
+        Create TimeSeriesDataSet from coin data dictionary.
+        
+        CRITICAL: Includes comprehensive validation to prevent None/empty dataset errors.
+        """
         logger.info("Preparing TFT dataset...")
+        
+        # ====================================================================
+        # VALIDATION 1: Check input data is not empty
+        # ====================================================================
+        if not data_dict:
+            raise ValueError("data_dict is empty. Cannot create dataset.")
         
         # Combine all coins into single dataframe
         df = self._prepare_dataframe(data_dict)
+        
+        # ====================================================================
+        # VALIDATION 2: Check dataframe is not empty
+        # ====================================================================
+        if df.empty:
+            raise ValueError("Combined dataframe is empty after preparation.")
+        
+        logger.info(f"Combined dataframe shape: {df.shape}")
+        
+        # ====================================================================
+        # VALIDATION 3: Check required columns exist
+        # ====================================================================
+        required_cols = ['coin', 'time_idx', target]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}. Available: {df.columns.tolist()}")
+        
+        # ====================================================================
+        # VALIDATION 4: Check for infinite values
+        # ====================================================================
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        inf_cols = []
+        for col in numeric_cols:
+            if np.isinf(df[col]).any():
+                inf_cols.append(col)
+        if inf_cols:
+            logger.warning(f"Found infinite values in columns: {inf_cols}. Replacing with NaN.")
+            df[inf_cols] = df[inf_cols].replace([np.inf, -np.inf], np.nan)
+        
+        # ====================================================================
+        # VALIDATION 5: Check NaN percentage per column
+        # ====================================================================
+        nan_pct = df.isnull().sum() / len(df) * 100
+        high_nan_cols = nan_pct[nan_pct > 50].index.tolist()
+        if high_nan_cols:
+            logger.warning(f"Columns with >50% NaN: {high_nan_cols}. Consider dropping or imputing.")
+        
+        # Drop rows with NaN in critical columns
+        rows_before = len(df)
+        df = df.dropna(subset=[target, 'coin', 'time_idx'])
+        rows_dropped = rows_before - len(df)
+        if rows_dropped > 0:
+            logger.info(f"Dropped {rows_dropped} rows with NaN in critical columns ({rows_dropped/rows_before*100:.1f}%)")
+        
+        # ====================================================================
+        # VALIDATION 6: Check minimum length for encoder/decoder windows
+        # ====================================================================
+        min_required_length = self.max_encoder_length + self.max_decoder_length
+        group_lengths = df.groupby('coin').size()
+        short_groups = group_lengths[group_lengths < min_required_length].index.tolist()
+        if short_groups:
+            logger.warning(f"Groups with insufficient length (<{min_required_length}): {short_groups}")
+            # Filter out short groups
+            df = df[~df['coin'].isin(short_groups)]
+            logger.info(f"After filtering short groups: {df.shape}")
+        
+        if df.empty:
+            raise ValueError(f"Dataframe is empty after filtering. Need at least {min_required_length} rows per coin.")
+        
+        # ====================================================================
+        # VALIDATION 7: Check group_ids consistency
+        # ====================================================================
+        unique_coins = df['coin'].unique()
+        logger.info(f"Unique coins in dataset: {len(unique_coins)}")
+        if len(unique_coins) == 0:
+            raise ValueError("No valid coin groups found in dataframe.")
         
         # Identify features
         known_reals, unknown_reals = self._identify_features(df)
@@ -128,30 +237,57 @@ class TFTModel:
         self.time_varying_unknown_reals = unknown_reals
         
         logger.info(f"Known reals: {known_reals}")
-        logger.info(f"Unknown reals: {unknown_reals[:5]}... (showing first 5)")
+        logger.info(f"Unknown reals: {len(unknown_reals)} features (showing first 5: {unknown_reals[:5]})")
+        
+        # ====================================================================
+        # VALIDATION 8: Ensure we have at least some features
+        # ====================================================================
+        if not unknown_reals:
+            logger.warning("No unknown real features found. Model may not train properly.")
         
         # Create TimeSeriesDataSet
-        training = TimeSeriesDataSet(
-            df,
-            time_idx="time_idx",
-            target=target,
-            group_ids=["coin"],
-            min_encoder_length=self.max_encoder_length // 2,
-            max_encoder_length=self.max_encoder_length,
-            # FIX: Renamed max_decoder_length to max_prediction_length for pytorch-forecasting compatibility
-            max_prediction_length=self.max_decoder_length,
-            static_categoricals=self.static_categoricals,
-            time_varying_known_reals=known_reals,
-            time_varying_unknown_reals=unknown_reals,
-            target_normalizer=GroupNormalizer(groups=["coin"], transformation="softplus"),
-            add_relative_time_idx=True,
-            add_target_scales=True,
-            add_encoder_length=True,
-            allow_missing_timesteps=True
-        )
+        try:
+            training = TimeSeriesDataSet(
+                df,
+                time_idx="time_idx",
+                target=target,
+                group_ids=["coin"],
+                min_encoder_length=self.max_encoder_length // 2,
+                max_encoder_length=self.max_encoder_length,
+                # FIX: Renamed max_decoder_length to max_prediction_length for pytorch-forecasting compatibility
+                max_prediction_length=self.max_decoder_length,
+                static_categoricals=self.static_categoricals,
+                time_varying_known_reals=known_reals,
+                time_varying_unknown_reals=unknown_reals,
+                target_normalizer=GroupNormalizer(groups=["coin"], transformation="softplus"),
+                add_relative_time_idx=True,
+                add_target_scales=True,
+                add_encoder_length=True,
+                allow_missing_timesteps=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to create TimeSeriesDataSet: {e}")
+            logger.error(f"Dataframe shape: {df.shape}")
+            logger.error(f"Dataframe columns: {df.columns.tolist()}")
+            logger.error(f"Target column '{target}' dtype: {df[target].dtype}")
+            logger.error(f"Target column NaN count: {df[target].isnull().sum()}")
+            raise
+        
+        # ====================================================================
+        # VALIDATION 9: Check dataset is not None and has samples
+        # ====================================================================
+        if training is None:
+            raise ValueError("TimeSeriesDataSet creation returned None.")
+        
+        dataset_length = len(training)
+        if dataset_length == 0:
+            raise ValueError("TimeSeriesDataSet has 0 samples. Check data filtering and window sizes.")
         
         self.training_data = training
-        logger.info(f"Dataset created with {len(training)} samples")
+        logger.info(f"✓ Dataset created successfully with {dataset_length} samples")
+        logger.info(f"  - First timestamp: {df['time_idx'].min() if 'time_idx' in df.columns else 'N/A'}")
+        logger.info(f"  - Last timestamp: {df['time_idx'].max() if 'time_idx' in df.columns else 'N/A'}")
+        logger.info(f"  - Number of features: {len(unknown_reals)}")
         
         return training
     
@@ -182,6 +318,58 @@ class TFTModel:
         logger.info(f"TFT model built with {sum(p.numel() for p in self.model.parameters())} parameters")
         
         return self.model
+    
+    def _extract_prediction_tensor(self, output):
+        """
+        Extract prediction tensor from pytorch-forecasting model output.
+        
+        CRITICAL FIX: Handles Output objects, dicts, and tensors robustly.
+        """
+        # If output has .prediction attribute (pytorch-forecasting Output object)
+        if hasattr(output, 'prediction'):
+            return output.prediction
+        
+        # If output is a dict and contains "prediction"
+        if isinstance(output, dict):
+            if "prediction" in output:
+                return output["prediction"]
+            else:
+                raise ValueError(
+                    f"Output is dict but missing 'prediction' key. "
+                    f"Available keys: {list(output.keys())}"
+                )
+        
+        # If output is a Tensor, use it directly
+        if isinstance(output, torch.Tensor):
+            return output
+        
+        # Otherwise raise clear error
+        raise ValueError(
+            f"Cannot extract prediction tensor from output type: {type(output)}. "
+            f"Output attributes: {dir(output) if hasattr(output, '__dict__') else 'N/A'}"
+        )
+    
+    def _extract_target_tensor(self, y):
+        """
+        Extract target tensor from y (handles tuple/list like (target, weight)).
+        
+        CRITICAL FIX: Returns only the target tensor, not the full tuple.
+        """
+        if isinstance(y, (list, tuple)):
+            # y is (target, weight) or similar - use first element (target)
+            y_true = y[0]
+            if not isinstance(y_true, torch.Tensor):
+                raise ValueError(
+                    f"y[0] is not a Tensor. Type: {type(y_true)}, "
+                    f"y structure: {[type(item) for item in y]}"
+                )
+            return y_true
+        elif isinstance(y, torch.Tensor):
+            return y
+        else:
+            raise ValueError(
+                f"y is not a tuple/list or Tensor. Type: {type(y)}"
+            )
     
     def train(
         self,
@@ -215,25 +403,96 @@ class TFTModel:
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         
         self.model.train()
+        debug_logged = False  # Flag for one-time debug logging
+        
         for epoch in range(epochs):
             epoch_loss = 0.0
             n_batches = 0
             
-            for batch in train_dataloader:
-                # CRITICAL FIX: Handle tuple unpacking correctly
-                x, y = batch
-                # x is a dictionary of tensors, move to device
-                x = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in x.items()}
+            for batch_idx, batch in enumerate(train_dataloader):
+                # ====================================================================
+                # CRITICAL FIX: FIX TFT TRAINING LOOP (Tuple Crash)
+                # ====================================================================
+                # PyTorch Forecasting's TimeSeriesDataSet returns batch as tuple (x, y)
+                # x is a dictionary of tensors, y is a tuple or tensor
+                # ====================================================================
+                try:
+                    # Explicit unpacking
+                    x, y = batch
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Error unpacking batch at index {batch_idx}: {e}")
+                    logger.error(f"Batch type: {type(batch)}")
+                    if hasattr(batch, '__len__'):
+                        logger.error(f"Batch length: {len(batch)}")
+                    raise
                 
-                # Handle target y (it might be a tuple, list, or tensor)
-                if isinstance(y, tuple) or isinstance(y, list):
-                    y = tuple(t.to(self.device) if isinstance(t, torch.Tensor) else t for t in y)
-                else:
-                    y = y.to(self.device)
+                # ====================================================================
+                # CRITICAL FIX: Move only tensors in x dictionary to device
+                # ====================================================================
+                x = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in x.items()}
                 
+                # ====================================================================
+                # CRITICAL FIX: Extract target tensor from y (handles tuple/list)
+                # ====================================================================
+                y_true = self._extract_target_tensor(y)
+                # Move target tensor to device
+                y_true = y_true.to(self.device)
+                
+                # Forward pass
                 optimizer.zero_grad()
-                y_hat = self.model(x)
-                loss = self.model.loss(y_hat, y)
+                output = self.model(x)
+                
+                # ====================================================================
+                # CRITICAL FIX: Extract prediction tensor from output
+                # ====================================================================
+                y_pred = self._extract_prediction_tensor(output)
+                
+                # ====================================================================
+                # ONE-TIME DEBUG LOGGING (first batch only)
+                # ====================================================================
+                if not debug_logged and batch_idx == 0:
+                    print("=" * 60)
+                    print("TFT TRAINING DEBUG (First Batch):")
+                    print(f"  output type: {type(output)}")
+                    print(f"  output has .prediction: {hasattr(output, 'prediction')}")
+                    if hasattr(output, '__dict__'):
+                        print(f"  output attributes: {list(output.__dict__.keys())}")
+                    print(f"  y type: {type(y)}")
+                    if isinstance(y, (list, tuple)):
+                        print(f"  y length: {len(y)}")
+                        print(f"  y element types: {[type(item) for item in y]}")
+                    print(f"  y_true type: {type(y_true)}, shape: {y_true.shape}")
+                    print(f"  y_pred type: {type(y_pred)}, shape: {y_pred.shape}")
+                    print(f"  y_true device: {y_true.device}, y_pred device: {y_pred.device}")
+                    print("=" * 60)
+                    debug_logged = True
+                
+                # ====================================================================
+                # CRITICAL FIX: Compute loss correctly
+                # ====================================================================
+                # Try model.loss if it exists and is callable
+                if hasattr(self.model, 'loss') and callable(self.model.loss):
+                    try:
+                        # pytorch-forecasting loss expects (y_pred, y_true) as tensors
+                        loss = self.model.loss(y_pred, y_true)
+                    except Exception as e:
+                        logger.warning(
+                            f"model.loss() failed with: {e}. "
+                            f"Falling back to MSE loss."
+                        )
+                        # Fallback to MSE loss
+                        loss = torch.nn.functional.mse_loss(
+                            y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred,
+                            y_true.float().squeeze(-1) if y_true.dim() > 1 else y_true.float()
+                        )
+                else:
+                    # Fallback to MSE loss if model.loss doesn't exist
+                    loss = torch.nn.functional.mse_loss(
+                        y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred,
+                        y_true.float().squeeze(-1) if y_true.dim() > 1 else y_true.float()
+                    )
+                
+                # Backward pass
                 loss.backward()
                 optimizer.step()
                 
@@ -250,20 +509,62 @@ class TFTModel:
                 val_batches = 0
                 
                 with torch.no_grad():
-                    for batch in val_dataloader:
-                        # CRITICAL FIX: Handle tuple unpacking correctly
-                        x, y = batch
-                        # x is a dictionary of tensors, move to device
-                        x = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in x.items()}
+                    for batch_idx, batch in enumerate(val_dataloader):
+                        # ====================================================================
+                        # CRITICAL FIX: FIX TFT VALIDATION LOOP (Tuple Crash)
+                        # ====================================================================
+                        try:
+                            # Explicit unpacking
+                            x, y = batch
+                        except (ValueError, TypeError) as e:
+                            logger.error(f"Error unpacking validation batch at index {batch_idx}: {e}")
+                            logger.error(f"Batch type: {type(batch)}")
+                            raise
                         
-                        # Handle target y (it might be a tuple, list, or tensor)
-                        if isinstance(y, tuple) or isinstance(y, list):
-                            y = tuple(t.to(self.device) if isinstance(t, torch.Tensor) else t for t in y)
+                        # ====================================================================
+                        # CRITICAL FIX: Move only tensors in x dictionary to device
+                        # ====================================================================
+                        x = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in x.items()}
+                        
+                        # ====================================================================
+                        # CRITICAL FIX: Extract target tensor from y (handles tuple/list)
+                        # ====================================================================
+                        y_true = self._extract_target_tensor(y)
+                        # Move target tensor to device
+                        y_true = y_true.to(self.device)
+                        
+                        # Forward pass
+                        output = self.model(x)
+                        
+                        # ====================================================================
+                        # CRITICAL FIX: Extract prediction tensor from output
+                        # ====================================================================
+                        y_pred = self._extract_prediction_tensor(output)
+                        
+                        # ====================================================================
+                        # CRITICAL FIX: Compute loss correctly
+                        # ====================================================================
+                        # Try model.loss if it exists and is callable
+                        if hasattr(self.model, 'loss') and callable(self.model.loss):
+                            try:
+                                # pytorch-forecasting loss expects (y_pred, y_true) as tensors
+                                loss = self.model.loss(y_pred, y_true)
+                            except Exception as e:
+                                logger.warning(
+                                    f"model.loss() failed in validation with: {e}. "
+                                    f"Falling back to MSE loss."
+                                )
+                                # Fallback to MSE loss
+                                loss = torch.nn.functional.mse_loss(
+                                    y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred,
+                                    y_true.float().squeeze(-1) if y_true.dim() > 1 else y_true.float()
+                                )
                         else:
-                            y = y.to(self.device)
-                        
-                        y_hat = self.model(x)
-                        loss = self.model.loss(y_hat, y)
+                            # Fallback to MSE loss if model.loss doesn't exist
+                            loss = torch.nn.functional.mse_loss(
+                                y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred,
+                                y_true.float().squeeze(-1) if y_true.dim() > 1 else y_true.float()
+                            )
                         val_loss += loss.item()
                         val_batches += 1
                 

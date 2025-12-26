@@ -126,8 +126,17 @@ class Trainer:
         if self.tft_model is None:
             self.tft_model = TFTModel(learning_rate=learning_rate or 1e-3)
         
-        # Create dataset
-        training_data = self.tft_model.create_dataset(data)
+        # Create dataset with error handling
+        try:
+            training_data = self.tft_model.create_dataset(data)
+        except Exception as e:
+            import traceback
+            logger.error(f"Failed to create TFT dataset: {e}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            print(f"ERROR: TFT dataset creation failed: {e}")
+            print("Full traceback:")
+            traceback.print_exc()
+            raise
         
         # CRITICAL DEBUG: Print training data shape
         # Get the underlying dataframe to check shape
@@ -136,20 +145,46 @@ class Trainer:
             print(f"FINAL DEBUG: Training Data Shape: {df_shape}")
         print(f"FINAL DEBUG: Training Dataset Samples: {len(training_data)}")
         
+        # VALIDATION: Ensure training_data is not None
+        if training_data is None:
+            raise ValueError("training_data is None after create_dataset(). Check data preparation.")
+        
         # Split data
         # Note: TimeSeriesDataSet doesn't support iloc, so we'll use all data
         # In production, use proper time-based splitting
         
-        # Build model
-        self.tft_model.build_model(training_data)
+        # Build model with error handling
+        try:
+            self.tft_model.build_model(training_data)
+        except Exception as e:
+            import traceback
+            logger.error(f"Failed to build TFT model: {e}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            print(f"ERROR: TFT model build failed: {e}")
+            print("Full traceback:")
+            traceback.print_exc()
+            raise
         
-        # Train
-        history = self.tft_model.train(
-            training_data=training_data,
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=True
-        )
+        # VALIDATION: Ensure model is not None
+        if self.tft_model.model is None:
+            raise ValueError("TFT model is None after build_model(). Check model architecture.")
+        
+        # Train with error handling
+        try:
+            history = self.tft_model.train(
+                training_data=training_data,
+                epochs=epochs,
+                batch_size=batch_size,
+                verbose=True
+            )
+        except Exception as e:
+            import traceback
+            logger.error(f"TFT training failed: {e}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            print(f"ERROR: TFT training failed: {e}")
+            print("Full traceback:")
+            traceback.print_exc()
+            raise
         
         # Save model
         save_path = self.models_dir / "tft_pretrained.pt"
