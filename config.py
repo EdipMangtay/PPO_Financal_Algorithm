@@ -127,8 +127,8 @@ MAX_POSITION_SIZE: float = 0.3  # Max 30% of portfolio per position
 # ============================================================================
 
 EXCHANGE_NAME: str = "binance"  # Using Binance Futures
-EXCHANGE_API_KEY: str = ""  # Set via environment variable
-EXCHANGE_SECRET: str = ""  # Set via environment variable
+EXCHANGE_API_KEY: str = "UN28uaVerSyRAljui0tJaXZ93B5z3eJy3CySrIbi2bfnufaawwJfXL17GnSnpQKx"
+EXCHANGE_SECRET: str = "YhqcPjCLl656z9yeA2EbodxkeN7Emu8IfbalKzCY4rRf19gTKX0JOOa5xAK4mJNe"
 EXCHANGE_SANDBOX: bool = True  # Start in sandbox mode
 
 # ============================================================================

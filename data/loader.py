@@ -12,6 +12,10 @@ from datetime import datetime, timedelta
 import logging
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (if exists)
+load_dotenv()
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

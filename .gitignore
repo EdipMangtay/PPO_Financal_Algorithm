@@ -51,7 +51,7 @@ data/raw/
 *.hdf5
 
 # Environment Variables
-.env
+# .env  # Commented out for private repo - API keys are in config.py
 .env.local
 
 # OS
