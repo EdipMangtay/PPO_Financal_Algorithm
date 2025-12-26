@@ -5,12 +5,20 @@ Creates a massive pool of indicators using pandas-ta for Optuna selection.
 
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 from typing import Dict, List, Tuple, Optional
 import logging
 
+try:
+    import pandas_ta as ta
+    HAS_PANDAS_TA = True
+except ImportError:
+    HAS_PANDAS_TA = False
+    logger = logging.getLogger(__name__)
+    logger.warning("pandas-ta not available. Some features will be limited. Install with: pip install pandas-ta (requires Python 3.12+)")
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+if 'logger' not in locals():
+    logger = logging.getLogger(__name__)
 
 
 class FeatureGenerator:

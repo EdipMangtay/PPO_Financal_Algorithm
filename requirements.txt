@@ -14,7 +14,7 @@ numpy>=1.24.0
 
 # Technical Analysis
 ta-lib>=0.4.0  # Optional, for additional indicators
-pandas-ta>=0.3.14b0  # For dynamic feature generation
+# pandas-ta>=0.3.14b0  # Requires Python 3.12+ - install manually if needed
 
 # Optimization
 optuna>=3.0.0
