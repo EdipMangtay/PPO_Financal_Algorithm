@@ -2,22 +2,20 @@
   "coin": "BTC/USDT",
   "timeframe": "1h",
   "selected_features": [
-    "Volume_MA_50",
-    "dist_VWAP",
-    "VWAP",
-    "MFI_21",
-    "OBV",
-    "Volume_MA",
-    "Volume_Ratio_50"
+    "RSI",
+    "MACD",
+    "MACD_signal",
+    "MACD_hist",
+    "ATR"
   ],
   "indicator_params": {},
-  "num_features": 7,
+  "num_features": 5,
   "performance": {
-    "aggressive_score": -10.0,
-    "sortino_ratio": -1000.0,
+    "aggressive_score": -1000.0,
+    "sortino_ratio": 0.0,
     "sharpe_ratio": 0.0,
-    "total_return": -1.0,
-    "max_drawdown": 1.0,
+    "total_return": 0.0,
+    "max_drawdown": 0.0,
     "num_trades": 0,
     "trades_per_month": 0.0
   }

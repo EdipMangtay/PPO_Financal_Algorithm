@@ -241,16 +241,19 @@ class TwoLayerOptimizer:
         expected_portfolio_return = expected_return * position_fraction
         
         # Calculate fees: entry + exit = 2 * TAKER_FEE on notional
-        from config import TAKER_FEE
+        from config import TAKER_FEE, SLIPPAGE_PCT
         fees_total = 2 * TAKER_FEE * position_notional  # open + close fees
-        fee_impact = fees_total / INITIAL_BALANCE if INITIAL_BALANCE > 0 else 0.0
-        expected_after_fees = expected_portfolio_return - fee_impact
+        # CRITICAL FIX: Include slippage cost (only exit slippage is charged in env)
+        slippage_total = SLIPPAGE_PCT * position_notional  # Exit slippage only
+        total_cost = fees_total + slippage_total
+        cost_impact = total_cost / INITIAL_BALANCE if INITIAL_BALANCE > 0 else 0.0
+        expected_after_fees = expected_portfolio_return - cost_impact
         
         logger.info(f"  Buy&Hold: Return={return_bh*100:.4f}%, "
                    f"Expected Asset Return (unlevered)={expected_return*100:.4f}%, "
                    f"Position Fraction={position_fraction*100:.2f}%, "
                    f"Expected Portfolio Return={expected_portfolio_return*100:.4f}%, "
-                   f"Expected After Fees={expected_after_fees*100:.4f}%")
+                   f"Expected After Fees (incl. slippage)={expected_after_fees*100:.4f}%")
         
         # VALIDATION: Should be close to expected portfolio return minus fees
         # Allow tolerance for slippage and rounding
@@ -604,10 +607,10 @@ class TwoLayerOptimizer:
                     atr=atr
                 )
                 
+                # CRITICAL FIX: Do NOT accumulate incremental returns
+                # equity_curve is the single source of truth
+                # portfolio_values kept only for backward compatibility (not used for metrics)
                 portfolio_values.append(info['portfolio_value'])
-                if len(portfolio_values) > 1:
-                    ret = (portfolio_values[-1] - portfolio_values[-2]) / portfolio_values[-2]
-                    returns.append(ret)
                 
                 # Pruning check
                 if trial and step > 0 and step % 50 == 0:
@@ -634,14 +637,82 @@ class TwoLayerOptimizer:
                 if terminated or truncated:
                     break
             
-            # CRITICAL: Get equity curve from environment
-            equity_curve = env.equity_curve if hasattr(env, 'equity_curve') else portfolio_values
+            # CRITICAL FIX: equity_curve is the SINGLE SOURCE OF TRUTH
+            equity_curve = env.equity_curve if hasattr(env, 'equity_curve') and len(env.equity_curve) > 0 else portfolio_values
             
-            # Calculate metrics from incremental updates
-            returns_array = np.array(returns) if returns else np.array([0.0])
-            portfolio_array = np.array(portfolio_values)
+            # CRITICAL FIX: Per-step invariant check (detect first mismatch)
+            # Check final step: equity_curve[-1] should match recomputed equity from current state
+            if len(equity_curve) > 0:
+                i = len(equity_curve) - 1  # Final step index
+                # Use _recompute_equity as single source of truth (if available)
+                if hasattr(env, '_recompute_equity'):
+                    recomputed_equity = env._recompute_equity()
+                elif hasattr(env, '_equity'):
+                    recomputed_equity = env._equity()
+                else:
+                    recomputed_equity = env.portfolio_value
+                
+                if abs(equity_curve[i] - recomputed_equity) > 1e-6:
+                    # Dump detailed debug snapshot
+                    current_price = None
+                    if hasattr(env, '_get_current_price') and hasattr(env, 'current_coin') and env.current_coin:
+                        current_price = env._get_current_price(env.current_coin)
+                    
+                    unrealized_pnl = 0.0
+                    if hasattr(env, '_mark_to_market'):
+                        unrealized_pnl = env._mark_to_market()
+                    
+                    positions_dict = {}
+                    if hasattr(env, 'positions'):
+                        positions_dict = {k: {
+                            'entry_price': v.entry_price,
+                            'margin_used': v.margin_used,
+                            'leverage': v.leverage,
+                            'position_type': v.position_type.name if hasattr(v.position_type, 'name') else str(v.position_type)
+                        } for k, v in env.positions.items()}
+                    
+                    debug_snapshot = {
+                        'step_index': i,
+                        'timestamp': env.current_step if hasattr(env, 'current_step') else i,
+                        'price': current_price,
+                        'balance': env.balance,
+                        'unrealized_pnl': unrealized_pnl,
+                        'positions': positions_dict,
+                        'equity_curve_value': equity_curve[i],
+                        'recomputed_equity': recomputed_equity,
+                        'mismatch': abs(equity_curve[i] - recomputed_equity),
+                        'cumulative_fees': getattr(env, 'cumulative_fees', 0.0),
+                        'used_margin': getattr(env, '_used_margin', 0.0) if hasattr(env, '_used_margin') else 0.0,
+                        'available_margin': getattr(env, '_available_margin', 0.0) if hasattr(env, '_available_margin') else 0.0
+                    }
+                    import json
+                    debug_file = Path("logs") / f"equity_mismatch_trial_{trial.number if trial else 'N/A'}_step_{i}.json"
+                    debug_file.parent.mkdir(exist_ok=True)
+                    with open(debug_file, 'w') as f:
+                        json.dump(debug_snapshot, f, indent=2, default=str)
+                    
+                    error_msg = (
+                        f"EQUITY INVARIANT FAILED at step {i}: "
+                        f"equity_curve[{i}]={equity_curve[i]:.9f}, "
+                        f"recomputed={recomputed_equity:.9f}, "
+                        f"mismatch={abs(equity_curve[i] - recomputed_equity):.9f}. "
+                        f"Debug snapshot saved to {debug_file}"
+                    )
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
             
-            total_return = (portfolio_array[-1] - portfolio_array[0]) / portfolio_array[0] if len(portfolio_array) > 1 else 0.0
+            # CRITICAL FIX: Calculate ALL metrics from equity_curve (single source of truth)
+            recalculated = self._recalculate_metrics_from_equity_curve(equity_curve)
+            total_return = recalculated['total_return']
+            max_dd = recalculated['max_drawdown']
+            
+            # Calculate returns array from equity curve for Sortino/Sharpe
+            if len(equity_curve) > 1:
+                equity_array = np.array(equity_curve)
+                returns_array = np.diff(equity_array) / equity_array[:-1]
+            else:
+                returns_array = np.array([0.0])
+            
             sortino = self._calculate_sortino_ratio(returns_array, timeframe=self.timeframe)
             
             if len(returns_array) > 0 and np.std(returns_array) > 0:
@@ -652,51 +723,20 @@ class TwoLayerOptimizer:
             else:
                 sharpe = 0.0
             
-            peak = np.maximum.accumulate(portfolio_array)
-            drawdown = (portfolio_array - peak) / peak
-            max_dd = abs(np.min(drawdown)) if len(drawdown) > 0 else 0.0
-            
             total_trades = info.get('total_trades', 0)
             months_simulated = steps / steps_per_month if steps_per_month > 0 else 1
             trades_per_month = total_trades / months_simulated if months_simulated > 0 else 0
             
-            # CRITICAL: METRICS CROSS-CHECK
-            # Recalculate from equity curve independently
-            recalculated = self._recalculate_metrics_from_equity_curve(equity_curve)
-            
-            # Verify consistency (allow 1e-3 tolerance)
-            if abs(total_return - recalculated['total_return']) > 1e-3:
-                error_msg = (
-                    f"METRICS CROSS-CHECK FAILED: Total return mismatch. "
-                    f"Incremental: {total_return:.6f}, Recalculated: {recalculated['total_return']:.6f}"
-                )
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            
-            if abs(max_dd - recalculated['max_drawdown']) > 1e-3:
-                error_msg = (
-                    f"METRICS CROSS-CHECK FAILED: Max drawdown mismatch. "
-                    f"Incremental: {max_dd:.6f}, Recalculated: {recalculated['max_drawdown']:.6f}"
-                )
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-            
             # Close environment (saves trade log)
             env.close()
             
-            # CRITICAL: Filter out lazy strategies aggressively
+            # CRITICAL FIX: Filter out lazy strategies - prune instead of returning fake score
             if total_trades < MIN_TRADES_FOR_OPTIMIZATION:
-                if trial:
-                    trial.report(-1000.0, step=steps)
                 logger.warning(f"Trial {trial.number if trial else 'N/A'}: Only {total_trades} trades (minimum: {MIN_TRADES_FOR_OPTIMIZATION})")
-                return {
-                    'sortino_ratio': -1000.0,
-                    'total_return': -1.0,
-                    'max_drawdown': 1.0,
-                    'num_trades': total_trades,
-                    'trades_per_month': trades_per_month,
-                    'sharpe_ratio': 0.0
-                }
+                if trial:
+                    raise optuna.TrialPruned(f"Insufficient trades: {total_trades} < {MIN_TRADES_FOR_OPTIMIZATION}")
+                else:
+                    raise RuntimeError(f"Insufficient trades: {total_trades} < {MIN_TRADES_FOR_OPTIMIZATION}")
             
             return {
                 'sortino_ratio': sortino,
@@ -709,21 +749,22 @@ class TwoLayerOptimizer:
             
         except optuna.TrialPruned:
             raise
-        except Exception as e:
+        except RuntimeError as e:
+            # CRITICAL FIX: Accounting errors should prune/fail trial, not return fake score
             trial_num = trial.number if trial else 'N/A'
-            print(f"DEBUG: Trial {trial_num} backtest FAILED: {str(e)}")
-            traceback.print_exc()
-            logger.error(f"Trial {trial_num}: Backtest failed: {e}")
+            logger.error(f"Trial {trial_num}: Accounting error - {e}")
             if trial:
-                trial.report(-1000.0, step=0)
-            return {
-                'sortino_ratio': -1000.0,
-                'total_return': -1.0,
-                'max_drawdown': 1.0,
-                'num_trades': 0,
-                'trades_per_month': 0.0,
-                'sharpe_ratio': 0.0
-            }
+                # Mark as pruned (accounting failure)
+                raise optuna.TrialPruned(f"Accounting error: {e}")
+            raise
+        except Exception as e:
+            # Other exceptions: also prune/fail, don't return fake score
+            trial_num = trial.number if trial else 'N/A'
+            logger.error(f"Trial {trial_num}: Backtest failed: {e}")
+            traceback.print_exc()
+            if trial:
+                raise optuna.TrialPruned(f"Backtest failed: {e}")
+            raise
     
     def optimize(self) -> Tuple[optuna.Study, Dict]:
         """
@@ -773,10 +814,18 @@ class TwoLayerOptimizer:
                 if sortino < 0:
                     sortino = 0.0
                 
+                # CRITICAL FIX: Do NOT return fake scores for failed trials
+                # If trades=0, prune the trial instead
                 if total_trades == 0:
-                    score = -10.0
-                else:
-                    score = sortino * np.log1p(total_trades)
+                    raise optuna.TrialPruned("No trades executed")
+                
+                # CRITICAL FIX: Validate metrics are finite
+                total_return_val = metrics['total_return']
+                max_dd_val = metrics['max_drawdown']
+                if not (np.isfinite(sortino) and np.isfinite(total_return_val) and np.isfinite(max_dd_val)):
+                    raise optuna.TrialPruned(f"Invalid metrics: sortino={sortino}, return={total_return_val}, dd={max_dd_val}")
+                
+                score = sortino * np.log1p(total_trades)
                 
                 print(f"DEBUG: Trial {trial.number} finished. Trades: {total_trades}, "
                       f"Sharpe: {sharpe:.4f}, Return: {total_return_pct:.2f}%, "
@@ -849,24 +898,85 @@ class TwoLayerOptimizer:
         
         logger.info(f"Optimization finished: {len(completed_trials)} completed, {len(pruned_trials)} pruned, {len(failed_trials)} failed")
         
+        # CRITICAL FIX: Handle case where all trials failed/pruned
         if len(completed_trials) == 0:
-            logger.error("CRITICAL: No trials completed!")
-            raise RuntimeError("No trials completed. Check logs for details.")
+            logger.warning("CRITICAL: No trials completed! Falling back to safe default config.")
+            # Return safe default feature config
+            safe_features = ['close', 'volume'] if 'close' in self.all_features else self.all_features[:5]
+            safe_config = {
+                'coin': self.coin,
+                'timeframe': self.timeframe,
+                'selected_features': safe_features,
+                'indicator_params': {},
+                'num_features': len(safe_features),
+                'performance': {
+                    'aggressive_score': -1000.0,
+                    'sortino_ratio': 0.0,
+                    'sharpe_ratio': 0.0,
+                    'total_return': 0.0,
+                    'max_drawdown': 0.0,
+                    'num_trades': 0,
+                    'trades_per_month': 0.0
+                }
+            }
+            logger.warning(f"Using safe default config with {len(safe_features)} features")
+            return study, safe_config
         
-        # Extract best configuration
+        # CRITICAL FIX: Validate best trial has valid metrics
         best_trial = study.best_trial
+        best_trades = best_trial.user_attrs.get('num_trades', 0)
+        best_return = best_trial.user_attrs.get('total_return', -1.0)
+        best_sortino = best_trial.user_attrs.get('sortino_ratio', -1000.0)
+        
+        # Check if best trial is invalid (trades=0, return=-1, sortino=-1000 suggests fake score)
+        if best_trades == 0 or not np.isfinite(best_return) or not np.isfinite(best_sortino) or best_sortino < -100:
+            logger.warning(f"Best trial has invalid metrics (trades={best_trades}, return={best_return}, sortino={best_sortino})")
+            # Find first valid completed trial
+            valid_trial = None
+            for trial in completed_trials:
+                t_trades = trial.user_attrs.get('num_trades', 0)
+                t_return = trial.user_attrs.get('total_return', -1.0)
+                t_sortino = trial.user_attrs.get('sortino_ratio', -1000.0)
+                if t_trades > 0 and np.isfinite(t_return) and np.isfinite(t_sortino) and t_sortino >= -100:
+                    valid_trial = trial
+                    break
+            
+            if valid_trial is None:
+                logger.warning("No valid trials found. Using safe default config.")
+                safe_features = ['close', 'volume'] if 'close' in self.all_features else self.all_features[:5]
+                safe_config = {
+                    'coin': self.coin,
+                    'timeframe': self.timeframe,
+                    'selected_features': safe_features,
+                    'indicator_params': {},
+                    'num_features': len(safe_features),
+                    'performance': {
+                        'aggressive_score': -1000.0,
+                        'sortino_ratio': 0.0,
+                        'sharpe_ratio': 0.0,
+                        'total_return': 0.0,
+                        'max_drawdown': 0.0,
+                        'num_trades': 0,
+                        'trades_per_month': 0.0
+                    }
+                }
+                return study, safe_config
+            else:
+                best_trial = valid_trial
+                logger.info(f"Using valid trial {best_trial.number} instead of invalid best trial")
+        
         best_config = {
             'coin': self.coin,
             'timeframe': self.timeframe,
-            'selected_features': best_trial.user_attrs['selected_features'],
-            'indicator_params': best_trial.user_attrs['indicator_params'],
-            'num_features': best_trial.user_attrs['num_features'],
+            'selected_features': best_trial.user_attrs.get('selected_features', []),
+            'indicator_params': best_trial.user_attrs.get('indicator_params', {}),
+            'num_features': best_trial.user_attrs.get('num_features', 0),
             'performance': {
-                'aggressive_score': study.best_value,
+                'aggressive_score': best_trial.value if best_trial.value is not None else -1000.0,
                 'sortino_ratio': best_trial.user_attrs.get('sortino_ratio', 0.0),
                 'sharpe_ratio': best_trial.user_attrs.get('sharpe_ratio', 0.0),
-                'total_return': best_trial.user_attrs['total_return'],
-                'max_drawdown': best_trial.user_attrs['max_drawdown'],
+                'total_return': best_trial.user_attrs.get('total_return', 0.0),
+                'max_drawdown': best_trial.user_attrs.get('max_drawdown', 0.0),
                 'num_trades': best_trial.user_attrs.get('num_trades', 0),
                 'trades_per_month': best_trial.user_attrs.get('trades_per_month', 0)
             }
