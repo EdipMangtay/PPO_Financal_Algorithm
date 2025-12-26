@@ -239,18 +239,21 @@ class ExitParameterTuner:
                 logger.error(f"Trial {trial.number} failed: {e}")
                 return -999.0  # Return very bad score on error
         
-        # Create study
+        # Create study - i5 Ultra 245KF (14 çekirdek) Optimized
+        from config import OPTUNA_N_JOBS
+        
         study = optuna.create_study(
             direction='maximize',
             study_name='exit_parameters_optimization'
         )
         
-        # Run optimization
+        # Run optimization - n_jobs study.optimize() içinde kullanılmalı
         study.optimize(
             objective_func,
             n_trials=self.n_trials,
             timeout=self.timeout,
-            show_progress_bar=True
+            show_progress_bar=True,
+            n_jobs=OPTUNA_N_JOBS  # 14 çekirdek → 6 paralel trial (tam güç)
         )
         
         # Print best results

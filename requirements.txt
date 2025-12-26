@@ -18,6 +18,7 @@ ta-lib>=0.4.0  # Optional, for additional indicators
 
 # Optimization
 optuna>=3.0.0
+optuna-dashboard>=0.15.0  # YENİ: Optuna Dashboard for live visualization
 
 # Scheduling
 APScheduler>=3.10.0

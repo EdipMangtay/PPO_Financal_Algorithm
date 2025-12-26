@@ -282,22 +282,54 @@ class DataLoader:
         days: int = 7, 
         timeframe: str = SCALP_TIMEFRAME,
         coins: Optional[List[str]] = None,
-        fetch_all_timeframes: bool = True
+        fetch_all_timeframes: bool = True,
+        use_cache: bool = True  # YENİ: Cache kullan
     ) -> Dict[str, pd.DataFrame]:
         """
         Fetch recent data for all coins with BTC/USDT context injection.
+        Önce disk cache'den kontrol eder, yoksa indirir.
         
         Args:
             days: Number of days to fetch
             timeframe: Primary candle timeframe
             coins: List of coins to fetch (defaults to TOP_20_COINS)
             fetch_all_timeframes: If True, fetch 15m, 1h, and 4h data before optimization
+            use_cache: If True, check disk cache first before downloading
         
         Returns:
             Dictionary mapping coin symbols to dataframes with context features
         """
         if coins is None:
             coins = TOP_20_COINS
+        
+        # ====================================================================
+        # CACHE KONTROLÜ: Önce disk'ten kontrol et
+        # ====================================================================
+        if use_cache and fetch_all_timeframes:
+            logger.info("=" * 60)
+            logger.info("CHECKING DISK CACHE...")
+            logger.info("=" * 60)
+            
+            timeframes_to_fetch = ['15m', '1h', '4h']
+            all_cached = True
+            cached_data = {}
+            
+            for tf in timeframes_to_fetch:
+                cached_data[tf] = await self.load_from_disk(timeframe=tf, coins=coins)
+                for coin in coins:
+                    if coin not in cached_data[tf]:
+                        all_cached = False
+                        logger.info(f"⚠ {coin} {tf} not in cache, will download")
+                        break
+                if not all_cached:
+                    break
+            
+            if all_cached:
+                logger.info("=" * 60)
+                logger.info("✓ ALL DATA LOADED FROM CACHE! Skipping download.")
+                logger.info("=" * 60)
+                # Primary timeframe için return et
+                return cached_data.get(timeframe, {})
         
         # ====================================================================
         # CRITICAL FIX: Download all timeframes BEFORE optimization

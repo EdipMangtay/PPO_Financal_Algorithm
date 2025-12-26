@@ -104,9 +104,16 @@ class Trainer:
             else:
                 return min(history['train_loss'])
         
-        # Run optimization
+        # Run optimization - i5 Ultra 245KF (14 çekirdek) Optimized
+        from config import OPTUNA_N_JOBS
+        
         study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=n_trials, timeout=timeout)
+        study.optimize(
+            objective, 
+            n_trials=n_trials, 
+            timeout=timeout,
+            n_jobs=OPTUNA_N_JOBS  # 14 çekirdek → 6 paralel trial (tam güç)
+        )
         
         best_params = study.best_params
         logger.info(f"Best TFT hyperparameters: {best_params}")
@@ -117,7 +124,7 @@ class Trainer:
         self,
         data: Dict[str, pd.DataFrame],
         epochs: int = 20,
-        batch_size: int = 64,
+        batch_size: int = 128,  # RTX 5070: 64 → 128
         learning_rate: Optional[float] = None
     ) -> TFTModel:
         """Pretrain TFT model on historical data."""

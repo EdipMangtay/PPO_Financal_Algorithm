@@ -39,6 +39,7 @@ from data.loader import DataLoader
 from data_engine.features import FeatureGenerator
 from tuning.optimizer import TwoLayerOptimizer, load_feature_config
 from models.tft import TFTModel
+from models.tft_ensemble import TFTEnsemble
 from models.ppo import PPOTradingAgent
 from env.trading_env import TradingEnv
 from trainer import Trainer
@@ -102,7 +103,8 @@ class MasterPipeline:
                 data_dict = await self.pipeline.step1_download_data(
                     days=days,
                     coins=coins,
-                    timeframe=timeframe
+                    timeframe=timeframe,
+                    use_cache=True  # YENİ: Cache kullan (disk'ten oku)
                 )
                 progress.update(task1, completed=100)
                 console.print(f"[green]✓ Downloaded data for {len(data_dict)} coins[/green]\n")
@@ -111,57 +113,171 @@ class MasterPipeline:
                 return
             
             # ====================================================================
-            # ADIM 2: OPTUNA OPTİMİZASYON
+            # ADIM 2: OPTUNA OPTİMİZASYON - TÜM TIMEFRAME'LER İÇİN
             # ====================================================================
-            task2 = progress.add_task("[yellow]Step 2: Feature optimization...", total=len(coins) * trials)
-            console.print("[bold yellow]STEP 2: FEATURE OPTIMIZATION (Optuna)[/bold yellow]")
+            all_timeframes = ['15m', '1h', '4h']
+            total_optimizations = len(coins) * len(all_timeframes) * trials
+            task2 = progress.add_task("[yellow]Step 2: Feature optimization (multi-timeframe)...", total=total_optimizations)
+            console.print("[bold yellow]STEP 2: FEATURE OPTIMIZATION (Optuna) - Multi-Timeframe[/bold yellow]")
+            console.print(f"[cyan]Optimizing {len(coins)} coins × {len(all_timeframes)} timeframes = {total_optimizations} total trials[/cyan]\n")
             
             feature_configs = {}
             for coin in coins:
                 if coin not in data_dict:
                     continue
                 
-                console.print(f"\n[cyan]Optimizing {coin}...[/cyan]")
-                try:
-                    df = data_dict[coin][timeframe]
-                    optimizer = TwoLayerOptimizer(
-                        coin=coin,
-                        timeframe=timeframe,
-                        data=df,
-                        n_trials=trials,
-                        timeout=None
-                    )
+                for tf in all_timeframes:
+                    if tf not in data_dict[coin]:
+                        console.print(f"[yellow]⚠ {coin} {tf} data not available, skipping...[/yellow]")
+                        continue
                     
-                    study, best_config = optimizer.optimize()
-                    optimizer.save_config(best_config)
-                    feature_configs[f"{coin}_{timeframe}"] = best_config
+                    console.print(f"\n[cyan]Optimizing {coin} {tf}...[/cyan]")
+                    console.print(f"[yellow]💡 Tip: View live dashboard in another terminal:[/yellow]")
+                    console.print(f"[yellow]   optuna-dashboard optuna_studies/feature_optimization_{coin.replace('/', '_')}_{tf}.db[/yellow]")
+                    console.print(f"[yellow]   Then open: http://localhost:8080[/yellow]\n")
                     
-                    progress.update(task2, advance=trials)
-                    console.print(f"[green]✓ {coin} optimized[/green]")
-                    
-                except Exception as e:
-                    console.print(f"[red]✗ {coin} optimization failed: {e}[/red]")
-                    continue
+                    try:
+                        df = data_dict[coin][tf]
+                        optimizer = TwoLayerOptimizer(
+                            coin=coin,
+                            timeframe=tf,
+                            data=df,
+                            n_trials=trials,
+                            timeout=None
+                        )
+                        
+                        study, best_config = optimizer.optimize()
+                        optimizer.save_config(best_config)
+                        feature_configs[f"{coin}_{tf}"] = best_config
+                        
+                        progress.update(task2, advance=trials)
+                        console.print(f"[green]✓ {coin} {tf} optimized[/green]")
+                        console.print(f"[cyan]📊 Dashboard: optuna-dashboard optuna_studies/feature_optimization_{coin.replace('/', '_')}_{tf}.db[/cyan]")
+                        
+                    except Exception as e:
+                        console.print(f"[red]✗ {coin} {tf} optimization failed: {e}[/red]")
+                        import traceback
+                        traceback.print_exc()
+                        continue
             
-            progress.update(task2, completed=len(coins) * trials)
-            console.print(f"\n[green]✓ Feature optimization completed for {len(feature_configs)} coins[/green]\n")
+            progress.update(task2, completed=total_optimizations)
+            console.print(f"\n[green]✓ Feature optimization completed: {len(feature_configs)} configs[/green]\n")
             
             # ====================================================================
-            # ADIM 3: MODEL EĞİTİMİ
+            # ADIM 3: MODEL EĞİTİMİ - TFT ENSEMBLE (3 TIMEFRAME)
             # ====================================================================
-            task3 = progress.add_task("[blue]Step 3: Training models...", total=100)
-            console.print("[bold blue]STEP 3: MODEL TRAINING[/bold blue]")
+            task3 = progress.add_task("[blue]Step 3: Training TFT Ensemble...", total=100)
+            console.print("[bold blue]STEP 3: MODEL TRAINING - TFT ENSEMBLE[/bold blue]")
+            console.print("[cyan]Training 3 TFT models (15m, 1h, 4h) + PPO[/cyan]\n")
             
             try:
-                self.pipeline.step3_deep_training(
-                    data_dict,
-                    feature_configs,
-                    timeframe=timeframe
-                )
+                from models.tft_ensemble import TFTEnsemble
+                
+                # Her timeframe için optimize edilmiş verileri hazırla
+                all_timeframes = ['15m', '1h', '4h']
+                optimized_data_by_timeframe = {}
+                
+                for tf in all_timeframes:
+                    optimized_data = {}
+                    for coin in coins:
+                        if coin not in data_dict or tf not in data_dict[coin]:
+                            continue
+                        
+                        config_key = f"{coin}_{tf}"
+                        if config_key not in feature_configs:
+                            continue
+                        
+                        df = data_dict[coin][tf].copy()
+                        feature_config = feature_configs[config_key]
+                        
+                        # Generate all features
+                        feature_generator = FeatureGenerator()
+                        df_with_features = feature_generator.generate_candidate_features(df)
+                        
+                        # Select only optimized features
+                        selected_features = feature_config['selected_features']
+                        base_cols = ['open', 'high', 'low', 'close']
+                        if 'volume' in df_with_features.columns:
+                            base_cols.append('volume')
+                        
+                        available_features = [f for f in selected_features if f in df_with_features.columns]
+                        feature_cols = base_cols + available_features
+                        
+                        optimized_df = df_with_features[feature_cols].copy()
+                        optimized_data[coin] = optimized_df
+                    
+                    if optimized_data:
+                        optimized_data_by_timeframe[tf] = optimized_data
+                        console.print(f"[green]✓ Prepared {len(optimized_data)} coins for {tf}[/green]")
+                
+                if not optimized_data_by_timeframe:
+                    console.print("[red]✗ No optimized data available for training[/red]")
+                    return
+                
+                # TFT Ensemble oluştur ve eğit
+                console.print("\n[cyan]Training TFT Ensemble (3 models)...[/cyan]")
+                ensemble = TFTEnsemble()
+                
+                # Her timeframe için model eğit
+                for tf in all_timeframes:
+                    if tf not in optimized_data_by_timeframe:
+                        console.print(f"[yellow]⚠ Skipping {tf} - no data[/yellow]")
+                        continue
+                    
+                    console.print(f"\n[cyan]Training TFT model for {tf}...[/cyan]")
+                    try:
+                        ensemble.train_model(
+                            timeframe=tf,
+                            data=optimized_data_by_timeframe[tf],
+                            epochs=30,
+                            batch_size=128  # RTX 5070 optimized
+                        )
+                        progress.update(task3, advance=33)
+                        console.print(f"[green]✓ {tf} TFT model trained[/green]")
+                    except Exception as e:
+                        console.print(f"[red]✗ {tf} TFT training failed: {e}[/red]")
+                        import traceback
+                        traceback.print_exc()
+                
+                # Ensemble'i kaydet
+                ensemble.save("models/checkpoints/tft_ensemble")
+                console.print("[green]✓ TFT Ensemble saved[/green]")
+                
+                # PPO eğitimi (15m için - primary timeframe)
+                if '15m' in optimized_data_by_timeframe:
+                    console.print("\n[cyan]Training PPO agent (15m)...[/cyan]")
+                    try:
+                        trainer = Trainer()
+                        trainer.pretrain_tft(
+                            optimized_data_by_timeframe['15m'],
+                            epochs=30,
+                            batch_size=128
+                        )
+                        
+                        # PPO eğitimi
+                        env = TradingEnv(
+                            data=optimized_data_by_timeframe['15m'],
+                            initial_balance=INITIAL_BALANCE
+                        )
+                        
+                        ppo_agent = PPOTradingAgent(env=env)
+                        ppo_agent.train(total_timesteps=5000000)  # 5M steps
+                        ppo_agent.save("models/checkpoints/ppo_trained")
+                        
+                        progress.update(task3, advance=1)
+                        console.print("[green]✓ PPO agent trained[/green]")
+                    except Exception as e:
+                        console.print(f"[yellow]⚠ PPO training failed: {e}[/yellow]")
+                        import traceback
+                        traceback.print_exc()
+                
                 progress.update(task3, completed=100)
                 console.print("[green]✓ Model training completed[/green]\n")
+                
             except Exception as e:
                 console.print(f"[red]✗ Training failed: {e}[/red]")
+                import traceback
+                traceback.print_exc()
                 return
             
             # ====================================================================

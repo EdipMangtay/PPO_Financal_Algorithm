@@ -1,6 +1,6 @@
 """
-GOD_LEVEL_TRADER_V5 - Central Configuration
-Hard-coded financial parameters for production trading system.
+GOD_LEVEL_TRADER_V5 - Deep Optimization Configuration
+RTX 5070 Full Power - Production Trading System
 """
 
 from typing import List, Dict
@@ -38,27 +38,56 @@ AGGRESSIVE_TRAILING_TRIGGER_PCT: float = 5.0  # Tighten trailing at 5.0% profit
 AGGRESSIVE_TRAILING_MULTIPLIER: float = 1.5  # Tightened trailing multiplier
 
 # Trading Fees & Execution Costs
-TAKER_FEE: float = 0.0006  # 0.06% taker fee
+TAKER_FEE: float = 0.0006  # 0.06% taker fee (TRANSACTION_FEE)
+TRANSACTION_FEE: float = 0.0006  # Alias for clarity
 SLIPPAGE_PCT: float = 0.0005  # 0.05% slippage per trade (realistic for crypto)
 SPREAD_PCT: float = 0.0002  # 0.02% bid-ask spread (typical for major pairs)
+
+# ============================================================================
+# PRODUCTION RISK ENGINE PARAMETERS (CRITICAL - HARD STOPS)
+# ============================================================================
+
+# Hard Stop Loss per Trade (CRITICAL: Overrides agent decisions)
+MAX_DRAWDOWN_PER_TRADE: float = 0.02  # 2% max loss per trade (hard stop)
+TAKE_PROFIT_THRESHOLD: float = 0.05  # 5% take profit (hard stop)
+
+# Maximum Position Hold Time (Time Stop)
+MAX_HOLD_BARS: int = 200  # Maximum bars to hold a position (force close)
+
+# Portfolio-Level Risk Limits
+MAX_PORTFOLIO_DRAWDOWN: float = 0.15  # 15% max portfolio drawdown (episode termination)
+MIN_PORTFOLIO_VALUE: float = 0.5  # 50% of initial balance (hard liquidation)
+
+# Position Size Limits
+MIN_TRADE_SIZE: float = 10.0  # Minimum trade size in USDT
+MAX_POSITION_SIZE: float = 0.3  # Max 30% of portfolio per position
+
+# ============================================================================
+# BI-DIRECTIONAL TRADING PARAMETERS
+# ============================================================================
+
+# Action Thresholds for Bi-Directional Trading
+LONG_ACTION_THRESHOLD: float = 0.3  # Action > 0.3 -> LONG
+SHORT_ACTION_THRESHOLD: float = -0.3  # Action < -0.3 -> SHORT
+# -0.3 <= Action <= 0.3 -> FLAT (Cash)
 
 # ============================================================================
 # MODEL PARAMETERS
 # ============================================================================
 
-# TFT Oracle Parameters
+# TFT Oracle Parameters - RTX 5070 Optimized
 TFT_PREDICTION_HORIZON: int = 12  # Predict next 12 candles
 TFT_MAX_ENCODER_LENGTH: int = 60  # Look back 60 candles
 TFT_MAX_DECODER_LENGTH: int = 12
-TFT_HIDDEN_SIZE: int = 64
-TFT_ATTENTION_HEAD_SIZE: int = 4
+TFT_HIDDEN_SIZE: int = 128  # RTX 5070: 64 → 128 (2x güç)
+TFT_ATTENTION_HEAD_SIZE: int = 8  # RTX 5070: 4 → 8 (2x attention)
 TFT_DROPOUT: float = 0.1
 
-# PPO Commander Parameters
-PPO_HIDDEN_SIZE: int = 256
+# PPO Commander Parameters - RTX 5070 Optimized
+PPO_HIDDEN_SIZE: int = 512  # RTX 5070: 256 → 512 (2x güç)
 PPO_LEARNING_RATE: float = 3e-4
-PPO_N_STEPS: int = 2048
-PPO_BATCH_SIZE: int = 64
+PPO_N_STEPS: int = 4096  # RTX 5070: 2048 → 4096 (daha fazla data)
+PPO_BATCH_SIZE: int = 256  # RTX 5070: 64 → 256 (4x batch - GPU'yu doldurur)
 PPO_N_EPOCHS: int = 10
 PPO_GAMMA: float = 0.99
 PPO_GAE_LAMBDA: float = 0.95
@@ -113,11 +142,20 @@ FINE_TUNE_EPOCHS: int = 5
 FINE_TUNE_LEARNING_RATE: float = 1e-5
 RETRAIN_LOOKBACK_DAYS: int = 7
 
-# Optuna Optimization
-OPTUNA_N_TRIALS: int = 50
-OPTUNA_TIMEOUT_SECONDS: int = 3600  # 1 hour
+# ============================================================================
+# DEEP OPTIMIZATION PARAMETERS (RTX 5070 Full Power)
+# ============================================================================
+
+# Optuna Optimization - Deep Search
+OPTUNA_N_TRIALS: int = 100  # Deep search: 100 trials (increased from 50)
+N_TRIALS: int = 100  # Alias for clarity
+OPTUNA_TIMEOUT_SECONDS: int = 14400  # 4 hours (for 100 trials with 10k steps)
 OPTUNA_TRAIN_VAL_SPLIT: float = 0.7  # 70% train, 30% validation (walk-forward)
 OPTUNA_WALK_FORWARD_WINDOWS: int = 3  # Number of walk-forward windows
+
+# Backtest Configuration - Deep Search
+BACKTEST_STEPS: int = 10000  # 10k steps ≈ 3 months of 15m data (increased from 2000)
+MIN_TRADES_FOR_OPTIMIZATION: int = 50  # Filter out lazy strategies aggressively
 
 # Reproducibility
 RANDOM_SEED: int = 42  # Global seed for reproducibility
@@ -127,8 +165,6 @@ RANDOM_SEED: int = 42  # Global seed for reproducibility
 # ============================================================================
 
 INITIAL_BALANCE: float = 10000.0  # Starting capital (USDT)
-MIN_TRADE_SIZE: float = 10.0  # Minimum trade size in USDT
-MAX_POSITION_SIZE: float = 0.3  # Max 30% of portfolio per position
 
 # ============================================================================
 # EXCHANGE CONFIGURATION
@@ -144,6 +180,44 @@ EXCHANGE_SANDBOX: bool = True  # Start in sandbox mode
 # ============================================================================
 
 import torch
+import os
+import multiprocessing
+
+# ============================================================================
+# CPU OPTIMIZATION - i5 Ultra 245KF (14 Çekirdek) - TAM GÜÇ
+# ============================================================================
+
+# CPU çekirdek sayısını otomatik algıla
+CPU_COUNT = multiprocessing.cpu_count()  # 14 çekirdek için
+
+# PyTorch thread ayarları (GPU ile birlikte çalışırken 12 thread kullan, 2 çekirdek GPU için bırak)
+# GPU yoksa tüm çekirdekleri kullan
+PYTORCH_NUM_THREADS = CPU_COUNT - 2 if torch.cuda.is_available() else CPU_COUNT
+torch.set_num_threads(PYTORCH_NUM_THREADS)
+
+# OpenMP ve MKL thread ayarları (NumPy, pandas için)
+os.environ['OMP_NUM_THREADS'] = str(PYTORCH_NUM_THREADS)
+os.environ['MKL_NUM_THREADS'] = str(PYTORCH_NUM_THREADS)
+
+# DataLoader için optimal worker sayısı (Windows'ta max 8 worker önerilir)
+# 14 çekirdek için 8 worker optimal (GPU data loading için yeterli)
+OPTIMAL_NUM_WORKERS = min(CPU_COUNT, 8)  # 14 çekirdek → 8 worker
+
+# Optuna paralel çalışma (CPU çekirdeklerinin yarısı kadar paralel trial)
+# 14 çekirdek için 4-6 paralel trial optimal
+OPTUNA_N_JOBS = min(6, CPU_COUNT // 2)  # 14 çekirdek → 6 paralel trial
+
+# ============================================================================
+# RTX 5070 GPU Optimizations
+# ============================================================================
+
+if torch.cuda.is_available():
+    # Mixed precision için optimizasyonlar
+    torch.backends.cudnn.benchmark = True  # Daha hızlı convolution
+    torch.backends.cudnn.deterministic = False  # Hız için
+    # GPU bellek optimizasyonu
+    torch.cuda.empty_cache()  # Cache'i temizle
+
 DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"  # Force CUDA for RTX 5070
 
 # ============================================================================
@@ -193,4 +267,3 @@ class TradingConfig:
 
 # Global config instance
 config = TradingConfig()
-

@@ -60,13 +60,15 @@ class FeatureEngineeringPipeline:
         self,
         days: int = 90,
         coins: List[str] = None,
-        timeframe: str = SCALP_TIMEFRAME
+        timeframe: str = SCALP_TIMEFRAME,
+        use_cache: bool = True  # YENİ: Cache kullan
     ) -> Dict[str, Dict]:
         """
-        Step 1: Download extensive history for all coins.
+        Step 1: Download extensive history for all coins and all timeframes.
+        Önce disk cache'den kontrol eder, yoksa indirir.
         
         Returns:
-            Dictionary: {coin: {timeframe: DataFrame}}
+            Dictionary: {coin: {timeframe: DataFrame}} - Tüm timeframe'ler (15m, 1h, 4h)
         """
         logger.info("=" * 60)
         logger.info("STEP 1: DATA DOWNLOAD")
@@ -75,14 +77,59 @@ class FeatureEngineeringPipeline:
         if coins is None:
             coins = TOP_20_COINS
         
-        logger.info(f"Downloading {days} days of {timeframe} data for {len(coins)} coins...")
+        all_timeframes = ['15m', '1h', '4h']
+        result = {}
         
-        # Download data
-        data = await self.data_loader.fetch_recent(days=days, timeframe=timeframe, coins=coins)
+        # ÖNCE DISK CACHE'DEN YÜKLE
+        if use_cache:
+            logger.info(f"Checking disk cache for {len(coins)} coins (all timeframes: 15m, 1h, 4h)...")
+            all_cached = True
+            
+            for coin in coins:
+                result[coin] = {}
+                for tf in all_timeframes:
+                    cached_data = await self.data_loader.load_from_disk(timeframe=tf, coins=[coin])
+                    if coin in cached_data:
+                        result[coin][tf] = cached_data[coin]
+                        logger.info(f"✓ Loaded {coin} {tf} from cache ({len(cached_data[coin])} rows)")
+                    else:
+                        all_cached = False
+                        result[coin][tf] = None  # İşaretle: indirilmeli
+                        logger.info(f"⚠ {coin} {tf} not in cache, will download")
+            
+            if all_cached:
+                logger.info("=" * 60)
+                logger.info("✓ ALL DATA LOADED FROM CACHE! Skipping download.")
+                logger.info("=" * 60)
+                return result
         
-        logger.info(f"Downloaded data for {len(data)} coins")
+        # EKSİK VERİLERİ İNDİR
+        logger.info(f"Downloading missing data for {len(coins)} coins...")
+        data = await self.data_loader.fetch_recent(
+            days=days, 
+            timeframe=timeframe, 
+            coins=coins,
+            fetch_all_timeframes=True,
+            use_cache=use_cache  # Cache kontrolü yapılsın
+        )
         
-        return {coin: {timeframe: df} for coin, df in data.items()}
+        # İndirilen verileri result'a ekle (cache'de olmayanlar için)
+        for coin in coins:
+            if coin not in result:
+                result[coin] = {}
+            for tf in all_timeframes:
+                if result[coin].get(tf) is None:  # Cache'de yoksa
+                    # Disk'ten tekrar kontrol et (yeni indirilmiş olabilir)
+                    cached_data = await self.data_loader.load_from_disk(timeframe=tf, coins=[coin])
+                    if coin in cached_data:
+                        result[coin][tf] = cached_data[coin]
+                        logger.info(f"✓ Loaded {coin} {tf} from disk after download")
+                    elif coin in data and tf == timeframe:
+                        # Primary timeframe için indirilen veriyi kullan
+                        result[coin][tf] = data[coin]
+        
+        logger.info(f"Data ready for {len(result)} coins across {len(all_timeframes)} timeframes")
+        return result
     
     def step2_feature_race(
         self,
@@ -207,7 +254,7 @@ class FeatureEngineeringPipeline:
         # Train TFT
         logger.info("Training TFT model...")
         self.trainer.tft_model = TFTModel()
-        self.trainer.pretrain_tft(optimized_data, epochs=30, batch_size=64)
+        self.trainer.pretrain_tft(optimized_data, epochs=30, batch_size=128)  # RTX 5070: 64 → 128
         
         # Create environment
         logger.info("Creating trading environment...")

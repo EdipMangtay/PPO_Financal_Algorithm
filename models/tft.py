@@ -24,7 +24,8 @@ from config import (
     TFT_ATTENTION_HEAD_SIZE,
     TFT_DROPOUT,
     CONTEXT_FEATURES,
-    TECHNICAL_INDICATORS
+    TECHNICAL_INDICATORS,
+    OPTIMAL_NUM_WORKERS
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -389,11 +390,21 @@ class TFTModel:
         if training_data is None:
             raise ValueError("Must provide training_data")
         
-        # Create dataloaders
-        train_dataloader = training_data.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
+        # Create dataloaders - i5 Ultra 245KF (14 çekirdek) Optimized
+        train_dataloader = training_data.to_dataloader(
+            train=True, 
+            batch_size=batch_size, 
+            num_workers=OPTIMAL_NUM_WORKERS,  # 14 çekirdek → 8 worker (tam güç)
+            pin_memory=True  # GPU'ya hızlı transfer
+        )
         
         if validation_data is not None:
-            val_dataloader = validation_data.to_dataloader(train=False, batch_size=batch_size * 10, num_workers=0)
+            val_dataloader = validation_data.to_dataloader(
+                train=False, 
+                batch_size=batch_size * 10, 
+                num_workers=OPTIMAL_NUM_WORKERS,  # 14 çekirdek → 8 worker
+                pin_memory=True
+            )
         else:
             val_dataloader = None
         
