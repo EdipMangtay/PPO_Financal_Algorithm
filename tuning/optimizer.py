@@ -266,7 +266,9 @@ class TwoLayerOptimizer:
                 
                 obs, reward, terminated, truncated, info = env.step(
                     action,
-                    tft_confidence=confidence,
+                    tft_confidence_15m=confidence,
+                    tft_confidence_1h=confidence,
+                    tft_confidence_4h=confidence,
                     atr=atr
                 )
                 

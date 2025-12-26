@@ -132,10 +132,12 @@ class ExitParameterTuner:
                 confidence = 0.5
                 atr = 0.0
             
-            # Step environment
+            # Step environment (using ensemble: same confidence for all timeframes)
             obs, reward, terminated, truncated, info = env.step(
                 action,
-                tft_confidence=confidence,
+                tft_confidence_15m=confidence,
+                tft_confidence_1h=confidence,
+                tft_confidence_4h=confidence,
                 atr=atr
             )
             

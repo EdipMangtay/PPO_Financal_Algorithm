@@ -29,6 +29,7 @@ CONFIDENCE_THRESHOLD: float = 0.65  # Lowered from 0.90 for ~20 trades/day
 # Stop Loss & Dynamic Trailing Stop (Chandelier Exit)
 INITIAL_SL_ATR_MULTIPLIER: float = 1.5  # Initial SL: Entry ± (ATR * 1.5)
 TRAILING_STOP_ATR_MULTIPLIER: float = 2.5  # Trailing distance: High/Low ± (ATR * 2.5)
+TAKE_PROFIT_ATR_MULTIPLIER: float = 3.0  # Take profit: Entry ± (ATR * 3.0)
 ATR_PERIOD: int = 14  # ATR calculation period
 
 # Profit Locking Thresholds
@@ -130,6 +131,13 @@ EXCHANGE_NAME: str = "binance"  # Using Binance Futures
 EXCHANGE_API_KEY: str = "UN28uaVerSyRAljui0tJaXZ93B5z3eJy3CySrIbi2bfnufaawwJfXL17GnSnpQKx"
 EXCHANGE_SECRET: str = "YhqcPjCLl656z9yeA2EbodxkeN7Emu8IfbalKzCY4rRf19gTKX0JOOa5xAK4mJNe"
 EXCHANGE_SANDBOX: bool = True  # Start in sandbox mode
+
+# ============================================================================
+# DEVICE CONFIGURATION
+# ============================================================================
+
+import torch
+DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"  # Force CUDA for RTX 5070
 
 # ============================================================================
 # LOGGING & MONITORING

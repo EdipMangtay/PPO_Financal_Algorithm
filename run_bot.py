@@ -376,10 +376,12 @@ class TradingBot:
                         # Get PPO action
                         action, lstm_states = self.ppo_agent.predict(obs, lstm_states=lstm_states)
                         
-                        # Step environment
+                        # Step environment (using ensemble: same confidence for all timeframes if single model)
                         obs, reward, terminated, truncated, info = self.env.step(
                             action,
-                            tft_confidence=confidence,
+                            tft_confidence_15m=confidence,
+                            tft_confidence_1h=confidence,
+                            tft_confidence_4h=confidence,
                             atr=atr
                         )
                         
