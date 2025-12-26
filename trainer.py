@@ -129,6 +129,13 @@ class Trainer:
         # Create dataset
         training_data = self.tft_model.create_dataset(data)
         
+        # CRITICAL DEBUG: Print training data shape
+        # Get the underlying dataframe to check shape
+        if hasattr(training_data, 'data'):
+            df_shape = training_data.data.shape if hasattr(training_data.data, 'shape') else 'N/A'
+            print(f"FINAL DEBUG: Training Data Shape: {df_shape}")
+        print(f"FINAL DEBUG: Training Dataset Samples: {len(training_data)}")
+        
         # Split data
         # Note: TimeSeriesDataSet doesn't support iloc, so we'll use all data
         # In production, use proper time-based splitting

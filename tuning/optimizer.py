@@ -11,6 +11,7 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 import logging
+import traceback
 
 import sys
 import os
@@ -220,22 +221,56 @@ class TwoLayerOptimizer:
             available_features = [f for f in selected_features if f in self.feature_pool_df.columns]
             
             if len(available_features) == 0:
+                # FIX: Return low score instead of pruning - allows trial to complete
+                logger.warning(f"Trial {trial.number if trial else 'N/A'}: No available features selected")
                 if trial:
-                    trial.report(-999.0, step=0)
-                    raise optuna.TrialPruned()
+                    trial.report(-1000.0, step=0)
                 return {
-                    'sortino_ratio': -999.0,
+                    'sortino_ratio': -1000.0,
                     'total_return': -1.0,
                     'max_drawdown': 1.0,
-                    'num_trades': 0
+                    'num_trades': 0,
+                    'trades_per_month': 0.0
                 }
             
             # Create feature DataFrame
             feature_cols = base_cols + available_features
             feature_df = self.feature_pool_df[feature_cols].copy()
             
-            # Prepare data dict (required format)
-            data_dict = {self.coin: feature_df}
+            # CRITICAL DEBUG: Check data size
+            print(f"CRITICAL DEBUG: Optimization Data Shape: {feature_df.shape}")
+            print(f"CRITICAL DEBUG: Data rows: {len(feature_df)}, Columns: {len(feature_df.columns)}")
+            if len(feature_df) < 1000:
+                print(f"WARNING: Data is very small ({len(feature_df)} rows). This may cause unrealistic results!")
+            
+            # CRITICAL FIX: Shift features by 1 to prevent look-ahead bias
+            # At time t, we can only use data from time t-1 and earlier
+            # We keep OHLCV base columns unshifted (needed for price calculation in env)
+            # But all technical indicator features must be shifted
+            feature_df_shifted = feature_df.copy()
+            for col in available_features:
+                if col in feature_df_shifted.columns:
+                    # Shift technical indicators by 1 period
+                    feature_df_shifted[col] = feature_df_shifted[col].shift(1)
+            
+            # Drop first row (NaN after shift)
+            feature_df_shifted = feature_df_shifted.dropna()
+            
+            print(f"CRITICAL DEBUG: After shift, data shape: {feature_df_shifted.shape}")
+            if len(feature_df_shifted) < 100:
+                print(f"ERROR: After shifting, data is too small ({len(feature_df_shifted)} rows). Cannot backtest!")
+                if trial:
+                    trial.report(-1000.0, step=0)
+                return {
+                    'sortino_ratio': -1000.0,
+                    'total_return': -1.0,
+                    'max_drawdown': 1.0,
+                    'num_trades': 0,
+                    'trades_per_month': 0.0
+                }
+            
+            # Prepare data dict (required format) - use shifted features
+            data_dict = {self.coin: feature_df_shifted}
             
             # Create environment
             env = TradingEnv(data=data_dict, initial_balance=INITIAL_BALANCE)
@@ -258,11 +293,12 @@ class TwoLayerOptimizer:
                 confidence = 0.7  # Higher confidence to pass threshold
                 
                 # Get ATR (try different periods)
+                # Use shifted dataframe for consistency
                 atr = 0.0
                 for atr_period in [14, 21, 7]:
                     atr_col = f'ATR_{atr_period}'
-                    if atr_col in feature_df.columns:
-                        atr = feature_df[atr_col].iloc[min(step, len(feature_df)-1)]
+                    if atr_col in feature_df_shifted.columns:
+                        atr = feature_df_shifted[atr_col].iloc[min(step, len(feature_df_shifted)-1)]
                         break
                 
                 obs, reward, terminated, truncated, info = env.step(
@@ -280,19 +316,34 @@ class TwoLayerOptimizer:
                 
                 # Early pruning: Check if we're on track for minimum trades
                 # Check every 50 steps (more frequent for faster pruning)
+                # FIX: Disable early pruning for first 20 trials to let them complete
                 if trial and step > 0 and step % 50 == 0:
                     months_simulated = step / steps_per_month if steps_per_month > 0 else 1
                     trades_per_month = info.get('total_trades', 0) / months_simulated if months_simulated > 0 else 0
                     
-                    # Report intermediate score for pruning
-                    current_score = 0.0  # Will be calculated at end
+                    # FIX: Calculate actual intermediate score instead of 0.0
+                    # This prevents MedianPruner from pruning all trials with same score
+                    if len(returns) > 0:
+                        intermediate_returns = np.array(returns)
+                        intermediate_sortino = self._calculate_sortino_ratio(intermediate_returns)
+                        intermediate_trades = info.get('total_trades', 0)
+                        # Use same scoring formula as final objective
+                        current_score = max(0, intermediate_sortino) * np.log1p(max(1, intermediate_trades))
+                    else:
+                        # Early stage: use small positive score to avoid immediate pruning
+                        current_score = 0.1 * np.log1p(max(1, info.get('total_trades', 0)))
+                    
                     trial.report(current_score, step=step)
                     
-                    # Prune if clearly not meeting minimum trades requirement
-                    # More lenient: only prune if very far from target (less than 30% of required)
-                    if months_simulated >= 0.5 and trades_per_month < min_trades_per_month * 0.3:
-                        # After half a month, if we're at less than 30% of required rate, prune
-                        logger.debug(f"Pruning trial at step {step}: Only {trades_per_month:.1f} trades/month (need {min_trades_per_month})")
+                    # FIX: Disable explicit early pruning for first 15 trials (matching n_startup_trials)
+                    # Only prune if extremely bad (less than 5% of required) AND after 2 months
+                    # AND only for trials after the first 15 (n_startup_trials)
+                    if (trial.number >= 15 and 
+                        months_simulated >= 2.0 and 
+                        trades_per_month < min_trades_per_month * 0.05):
+                        # Very lenient: only prune if extremely bad after 2 months
+                        print(f"DEBUG: Trial {trial.number}: Explicitly pruning at step {step} - Only {trades_per_month:.1f} trades/month (need {min_trades_per_month})")
+                        logger.info(f"Trial {trial.number}: Explicitly pruning at step {step} - Only {trades_per_month:.1f} trades/month (need {min_trades_per_month})")
                         raise optuna.TrialPruned()
                 
                 if terminated or truncated:
@@ -324,15 +375,15 @@ class TwoLayerOptimizer:
             months_simulated = steps / steps_per_month if steps_per_month > 0 else 1
             trades_per_month = total_trades / months_simulated if months_simulated > 0 else 0
             
-            # Only penalize if extremely low (less than 5 trades/month)
-            if trades_per_month < 5:
-                # Too passive, return very bad score
-                logger.debug(f"Trial failed minimum trade constraint: {trades_per_month:.1f} trades/month")
+            # FIX: Handle zero/low trades gracefully - return low score instead of pruning
+            # This allows trials to complete even if they perform poorly
+            if trades_per_month < 2:
+                # Too passive, return very bad score (but don't prune - let trial complete)
+                logger.info(f"Trial {trial.number if trial else 'N/A'}: Low trade frequency - {trades_per_month:.1f} trades/month, {total_trades} total trades")
                 if trial:
-                    trial.report(-999.0, step=steps)
-                    raise optuna.TrialPruned()
+                    trial.report(-1000.0, step=steps)
                 return {
-                    'sortino_ratio': -999.0,
+                    'sortino_ratio': -1000.0,
                     'total_return': -1.0,
                     'max_drawdown': 1.0,
                     'num_trades': total_trades,
@@ -349,17 +400,29 @@ class TwoLayerOptimizer:
             }
             
         except optuna.TrialPruned:
-            raise  # Re-raise pruning
+            raise  # Re-raise pruning (only for explicit pruning decisions)
         except Exception as e:
-            logger.warning(f"Backtest failed: {e}")
+            # FIX: Print full error traceback to terminal for visibility
+            trial_num = trial.number if trial else 'N/A'
+            print(f"DEBUG: Trial {trial_num} backtest FAILED with exception:")
+            print(f"Exception: {str(e)}")
+            print("Full traceback:")
+            traceback.print_exc()  # Print to terminal
+            
+            # Also log to logger
+            logger.error(f"Trial {trial_num}: Backtest failed with exception:")
+            logger.error(f"Exception: {str(e)}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            
+            # FIX: Return low score instead of pruning - allows trial to complete
             if trial:
-                trial.report(-999.0, step=0)
-                raise optuna.TrialPruned()
+                trial.report(-1000.0, step=0)
             return {
-                'sortino_ratio': -999.0,
+                'sortino_ratio': -1000.0,
                 'total_return': -1.0,
                 'max_drawdown': 1.0,
-                'num_trades': 0
+                'num_trades': 0,
+                'trades_per_month': 0.0
             }
     
     def optimize(self) -> Tuple[optuna.Study, Dict]:
@@ -372,62 +435,107 @@ class TwoLayerOptimizer:
         logger.info(f"Starting two-layer optimization for {self.coin} {self.timeframe}...")
         
         def objective(trial: optuna.Trial):
-            # Layer 1: Feature Selection
-            selected_features = self._suggest_feature_selection(trial)
-            
-            # Layer 2: Parameter Tuning
-            indicator_params = self._suggest_indicator_parameters(trial, selected_features)
-            
-            # Backtest configuration (with trial for pruning)
-            metrics = self._backtest_feature_config(
-                selected_features=selected_features,
-                indicator_params=indicator_params,
-                steps=500,  # Reduced for speed during optimization
-                trial=trial
-            )
-            
-            # Store trial info
-            trial.set_user_attr('selected_features', selected_features)
-            trial.set_user_attr('indicator_params', indicator_params)
-            trial.set_user_attr('num_features', len(selected_features))
-            trial.set_user_attr('total_return', metrics['total_return'])
-            trial.set_user_attr('max_drawdown', metrics['max_drawdown'])
-            trial.set_user_attr('num_trades', metrics['num_trades'])
-            trial.set_user_attr('trades_per_month', metrics.get('trades_per_month', 0))
-            trial.set_user_attr('sortino_ratio', metrics['sortino_ratio'])
-            trial.set_user_attr('sharpe_ratio', metrics.get('sharpe_ratio', 0.0))
-            
-            # ====================================================================
-            # AGGRESSIVE OBJECTIVE: Sortino_Ratio * log1p(Total_Trades)
-            # ====================================================================
-            # This forces high-frequency trading:
-            # - Low trades (5) → log1p(5) ≈ 1.79 → heavily penalized
-            # - High trades (100) → log1p(100) ≈ 4.61 → boosted
-            # - Optuna will find indicators that generate frequent signals
-            # ====================================================================
-            total_trades = metrics['num_trades']
-            sortino = metrics['sortino_ratio']
-            
-            # Ensure positive Sortino (negative means losing strategy)
-            if sortino < 0:
-                sortino = 0.0
-            
-            # Calculate aggressive score
-            score = sortino * np.log1p(total_trades)
-            
-            logger.debug(
-                f"Trial {trial.number}: Sortino={sortino:.2f}, "
-                f"Trades={total_trades}, Score={score:.2f}"
-            )
-            
-            return score
+            """Objective function with comprehensive debug logging."""
+            try:
+                # Layer 1: Feature Selection
+                selected_features = self._suggest_feature_selection(trial)
+                logger.info(f"Trial {trial.number}: Selected {len(selected_features)} features")
+                
+                # Layer 2: Parameter Tuning
+                indicator_params = self._suggest_indicator_parameters(trial, selected_features)
+                
+                # Backtest configuration (with trial for pruning)
+                metrics = self._backtest_feature_config(
+                    selected_features=selected_features,
+                    indicator_params=indicator_params,
+                    steps=500,  # Reduced for speed during optimization
+                    trial=trial
+                )
+                
+                # Store trial info
+                trial.set_user_attr('selected_features', selected_features)
+                trial.set_user_attr('indicator_params', indicator_params)
+                trial.set_user_attr('num_features', len(selected_features))
+                trial.set_user_attr('total_return', metrics['total_return'])
+                trial.set_user_attr('max_drawdown', metrics['max_drawdown'])
+                trial.set_user_attr('num_trades', metrics['num_trades'])
+                trial.set_user_attr('trades_per_month', metrics.get('trades_per_month', 0))
+                trial.set_user_attr('sortino_ratio', metrics['sortino_ratio'])
+                trial.set_user_attr('sharpe_ratio', metrics.get('sharpe_ratio', 0.0))
+                
+                # ====================================================================
+                # AGGRESSIVE OBJECTIVE: Sortino_Ratio * log1p(Total_Trades)
+                # ====================================================================
+                # This forces high-frequency trading:
+                # - Low trades (5) → log1p(5) ≈ 1.79 → heavily penalized
+                # - High trades (100) → log1p(100) ≈ 4.61 → boosted
+                # - Optuna will find indicators that generate frequent signals
+                # ====================================================================
+                total_trades = metrics['num_trades']
+                sortino = metrics['sortino_ratio']
+                sharpe = metrics.get('sharpe_ratio', 0.0)
+                total_return_pct = metrics['total_return'] * 100
+                trades_per_month = metrics.get('trades_per_month', 0)
+                
+                # FIX: Ensure positive Sortino (negative means losing strategy)
+                if sortino < 0:
+                    sortino = 0.0
+                
+                # FIX: Handle zero trades gracefully - return penalty score but mark as COMPLETED
+                if total_trades == 0:
+                    score = -10.0  # Heavy penalty for zero trades
+                    print(f"DEBUG: Trial {trial.number} finished with ZERO TRADES. Returning penalty score: {score}")
+                    logger.warning(f"Trial {trial.number}: Zero trades detected - returning penalty score {score}")
+                else:
+                    # Calculate aggressive score
+                    score = sortino * np.log1p(total_trades)
+                
+                # FIX: Visible print statement BEFORE returning (as requested)
+                # This allows user to see in terminal exactly why a trial might be bad
+                print(f"DEBUG: Trial {trial.number} finished. Trades: {total_trades}, "
+                      f"Sharpe: {sharpe:.4f}, Return: {total_return_pct:.2f}%, "
+                      f"Sortino: {sortino:.4f}, Score: {score:.4f}")
+                
+                # Also log to logger for file logging
+                logger.info(
+                    f"Trial {trial.number} COMPLETED: "
+                    f"Trades={total_trades}, "
+                    f"Trades/Month={trades_per_month:.1f}, "
+                    f"Return={total_return_pct:+.2f}%, "
+                    f"Sharpe={sharpe:.2f}, "
+                    f"Sortino={sortino:.2f}, "
+                    f"Score={score:.4f}"
+                )
+                
+                return score
+                
+            except optuna.TrialPruned as e:
+                # Re-raise pruning (only for explicit pruning decisions)
+                print(f"DEBUG: Trial {trial.number}: Explicitly pruned")
+                logger.info(f"Trial {trial.number}: Explicitly pruned")
+                raise
+            except Exception as e:
+                # FIX: Print full error traceback to terminal for visibility
+                print(f"DEBUG: Trial {trial.number} FAILED with exception:")
+                print(f"Exception: {str(e)}")
+                print("Full traceback:")
+                traceback.print_exc()  # Print to terminal
+                
+                # Also log to logger
+                logger.error(f"Trial {trial.number}: Objective function failed with exception:")
+                logger.error(f"Exception: {str(e)}")
+                logger.error(f"Full traceback:\n{traceback.format_exc()}")
+                
+                # Return very low score instead of raising - allows trial to complete
+                return -1000.0
         
-        # Create study with MedianPruner for early stopping
-        # This will prune trials that are clearly underperforming
+        # FIX: Create study with relaxed MedianPruner
+        # CRITICAL: n_startup_trials=15 ensures first 15 trials finish completely
+        # This allows Optuna to learn the baseline before pruning
         pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=5,  # Don't prune first 5 trials
-            n_warmup_steps=10,   # Wait 10 steps before pruning
-            interval_steps=1     # Check every step
+            n_startup_trials=15,  # Don't prune first 15 trials - MUST allow baseline learning
+            n_warmup_steps=200,   # Wait 200 steps before pruning (increased from 100)
+            interval_steps=50     # Check every 50 steps instead of every step
         )
         
         study = optuna.create_study(
@@ -437,12 +545,28 @@ class TwoLayerOptimizer:
         )
         
         # Run optimization
+        logger.info(f"Starting optimization with {self.n_trials} trials...")
         study.optimize(
             objective,
             n_trials=self.n_trials,
             timeout=self.timeout,
             show_progress_bar=True
         )
+        
+        # FIX: Check if any trials completed
+        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        pruned_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
+        failed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
+        
+        logger.info(f"Optimization finished: {len(completed_trials)} completed, {len(pruned_trials)} pruned, {len(failed_trials)} failed")
+        
+        if len(completed_trials) == 0:
+            logger.error("CRITICAL: No trials completed! All trials were pruned or failed.")
+            logger.error("This usually means:")
+            logger.error("  1. All trials generated 0 trades")
+            logger.error("  2. All trials raised exceptions")
+            logger.error("  3. Pruning logic is too aggressive")
+            raise RuntimeError("No trials are completed yet. Check logs for details.")
         
         # Extract best configuration
         best_trial = study.best_trial

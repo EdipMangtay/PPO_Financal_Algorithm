@@ -113,21 +113,58 @@ class DataLoader:
         symbol: str, 
         timeframe: str, 
         since: Optional[int] = None,
-        limit: int = 500
+        limit: Optional[int] = 500
     ) -> pd.DataFrame:
-        """Fetch OHLCV data for a symbol."""
+        """
+        Fetch OHLCV data for a symbol.
+        If limit is None, fetches all available data using pagination.
+        """
         exchange = await self._get_exchange()
         
         try:
-            # Rate limit delay
-            await asyncio.sleep(API_RATE_LIMIT_DELAY)
+            # CRITICAL FIX: If limit is None, fetch all data using pagination
+            if limit is None:
+                all_ohlcv = []
+                current_since = since
+                max_limit = 1000  # Binance API maximum per request
+                
+                while True:
+                    await asyncio.sleep(API_RATE_LIMIT_DELAY)
+                    
+                    batch = await exchange.fetch_ohlcv(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        since=current_since,
+                        limit=max_limit
+                    )
+                    
+                    if not batch or len(batch) == 0:
+                        break
+                    
+                    all_ohlcv.extend(batch)
+                    
+                    # If we got less than max_limit, we've reached the end
+                    if len(batch) < max_limit:
+                        break
+                    
+                    # Update since to the last timestamp + 1ms
+                    current_since = batch[-1][0] + 1
+                
+                ohlcv = all_ohlcv
+                logger.info(f"Fetched {len(ohlcv)} candles for {symbol} {timeframe} (full dataset)")
+            else:
+                # Rate limit delay
+                await asyncio.sleep(API_RATE_LIMIT_DELAY)
+                
+                ohlcv = await exchange.fetch_ohlcv(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    since=since,
+                    limit=limit
+                )
             
-            ohlcv = await exchange.fetch_ohlcv(
-                symbol=symbol,
-                timeframe=timeframe,
-                since=since,
-                limit=limit
-            )
+            if not ohlcv:
+                return pd.DataFrame()
             
             df = pd.DataFrame(
                 ohlcv,
@@ -165,7 +202,7 @@ class DataLoader:
             logger.error(f"Error fetching USDT dominance: {e}")
             return pd.Series([50.0] * 500, name='USDT_Dominance')
     
-    async def _fetch_btc_data(self, timeframe: str, limit: int = 500) -> pd.DataFrame:
+    async def _fetch_btc_data(self, timeframe: str, limit: Optional[int] = 500) -> pd.DataFrame:
         """Fetch BTC data for context injection."""
         btc_df = await self._fetch_ohlcv('BTC/USDT', timeframe, limit=limit)
         if btc_df.empty:
@@ -280,7 +317,8 @@ class DataLoader:
                 
                 # Fetch BTC context data for this timeframe
                 logger.info(f"Fetching BTC context data for {tf}...")
-                btc_df = await self._fetch_btc_data(tf, limit=1000)
+                # CRITICAL FIX: Remove limit to fetch full dataset
+                btc_df = await self._fetch_btc_data(tf, limit=None)
                 
                 # Fetch USDT dominance
                 if tf == '15m':  # Only fetch once
@@ -290,7 +328,8 @@ class DataLoader:
                 # Fetch all coin data for this timeframe
                 for coin in coins:
                     logger.info(f"Fetching {coin} {tf}...")
-                    coin_df = await self._fetch_ohlcv(coin, tf, since=since_ms, limit=1000)
+                    # CRITICAL FIX: Remove limit to fetch full dataset
+                    coin_df = await self._fetch_ohlcv(coin, tf, since=since_ms, limit=None)
                     
                     if not coin_df.empty:
                         # Add technical indicators
@@ -317,7 +356,8 @@ class DataLoader:
         
         # Fetch BTC context data first
         logger.info("Fetching BTC context data...")
-        btc_df = await self._fetch_btc_data(timeframe, limit=1000)
+        # CRITICAL FIX: Remove limit to fetch full dataset
+        btc_df = await self._fetch_btc_data(timeframe, limit=None)
         
         # Fetch USDT dominance
         logger.info("Fetching USDT dominance...")
@@ -327,7 +367,8 @@ class DataLoader:
         coin_data = {}
         for coin in coins:
             logger.info(f"Fetching {coin}...")
-            coin_df = await self._fetch_ohlcv(coin, timeframe, since=since_ms, limit=1000)
+            # CRITICAL FIX: Remove limit to fetch full dataset
+            coin_df = await self._fetch_ohlcv(coin, timeframe, since=since_ms, limit=None)
             
             if not coin_df.empty:
                 # Add technical indicators

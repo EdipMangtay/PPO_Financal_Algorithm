@@ -138,8 +138,8 @@ class TFTModel:
             group_ids=["coin"],
             min_encoder_length=self.max_encoder_length // 2,
             max_encoder_length=self.max_encoder_length,
-            min_decoder_length=1,
-            max_decoder_length=self.max_decoder_length,
+            # FIX: Renamed max_decoder_length to max_prediction_length for pytorch-forecasting compatibility
+            max_prediction_length=self.max_decoder_length,
             static_categoricals=self.static_categoricals,
             time_varying_known_reals=known_reals,
             time_varying_unknown_reals=unknown_reals,
@@ -220,9 +220,16 @@ class TFTModel:
             n_batches = 0
             
             for batch in train_dataloader:
+                # CRITICAL FIX: Handle tuple unpacking correctly
                 x, y = batch
+                # x is a dictionary of tensors, move to device
                 x = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in x.items()}
-                y = y.to(self.device)
+                
+                # Handle target y (it might be a tuple, list, or tensor)
+                if isinstance(y, tuple) or isinstance(y, list):
+                    y = tuple(t.to(self.device) if isinstance(t, torch.Tensor) else t for t in y)
+                else:
+                    y = y.to(self.device)
                 
                 optimizer.zero_grad()
                 y_hat = self.model(x)
@@ -244,9 +251,16 @@ class TFTModel:
                 
                 with torch.no_grad():
                     for batch in val_dataloader:
+                        # CRITICAL FIX: Handle tuple unpacking correctly
                         x, y = batch
+                        # x is a dictionary of tensors, move to device
                         x = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in x.items()}
-                        y = y.to(self.device)
+                        
+                        # Handle target y (it might be a tuple, list, or tensor)
+                        if isinstance(y, tuple) or isinstance(y, list):
+                            y = tuple(t.to(self.device) if isinstance(t, torch.Tensor) else t for t in y)
+                        else:
+                            y = y.to(self.device)
                         
                         y_hat = self.model(x)
                         loss = self.model.loss(y_hat, y)
@@ -298,8 +312,8 @@ class TFTModel:
             group_ids=["coin"],
             min_encoder_length=self.max_encoder_length // 2,
             max_encoder_length=self.max_encoder_length,
-            min_decoder_length=1,
-            max_decoder_length=self.max_decoder_length,
+            # FIX: Renamed max_decoder_length to max_prediction_length for pytorch-forecasting compatibility
+            max_prediction_length=self.max_decoder_length,
             static_categoricals=self.static_categoricals,
             time_varying_known_reals=known_reals,
             time_varying_unknown_reals=unknown_reals,

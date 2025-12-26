@@ -196,6 +196,12 @@ class FeatureEngineeringPipeline:
             logger.error("No optimized data prepared. Cannot train.")
             return
         
+        # CRITICAL DEBUG: Print data shapes before training
+        for coin, df in optimized_data.items():
+            print(f"FINAL DEBUG: {coin} Training Data Shape: {df.shape}")
+            if len(df) < 1000:
+                logger.warning(f"WARNING: {coin} has only {len(df)} rows. Expected > 1000 for full dataset!")
+        
         logger.info(f"\nTraining on {len(optimized_data)} coins with optimized features...")
         
         # Train TFT

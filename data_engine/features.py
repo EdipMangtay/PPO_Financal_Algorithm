@@ -452,7 +452,24 @@ class FeatureGenerator:
         df = df.bfill().fillna(0)
         df = df.replace([np.inf, -np.inf], 0)
         
-        feature_count = len([c for c in df.columns if c not in ['open', 'high', 'low', 'close', 'volume', 'timestamp']])
+        # CRITICAL FIX: Sanitize column names - remove dots ('.') which cause issues
+        df.columns = df.columns.str.replace('.', '_')
+        logger.info("Sanitized column names (removed dots)")
+        
+        # CRITICAL FIX: Shift features by 1 to prevent look-ahead bias
+        # At time t, we can only use data from time t-1 and earlier
+        # Keep OHLCV and timestamp unshifted (needed for price calculation)
+        base_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp']
+        feature_cols = [c for c in df.columns if c not in base_cols]
+        
+        if feature_cols:
+            logger.info(f"Shifting {len(feature_cols)} feature columns by 1 period to prevent look-ahead bias")
+            df[feature_cols] = df[feature_cols].shift(1)
+            # Drop first row (NaN after shift)
+            df = df.dropna()
+            logger.info(f"After shift, data shape: {df.shape}")
+        
+        feature_count = len([c for c in df.columns if c not in base_cols])
         logger.info(f"Generated {feature_count} candidate features")
         
         return df
