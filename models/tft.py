@@ -292,8 +292,22 @@ class TFTModel:
         
         return training
     
-    def build_model(self, training_data: Optional[TimeSeriesDataSet] = None) -> TemporalFusionTransformer:
-        """Build TFT model architecture."""
+    def build_model(
+        self, 
+        training_data: Optional[TimeSeriesDataSet] = None,
+        output_size: Optional[int] = None,
+        loss: Optional[nn.Module] = None,
+        config: Optional[Dict] = None
+    ) -> TemporalFusionTransformer:
+        """
+        Build TFT model architecture.
+        
+        Args:
+            training_data: TimeSeriesDataSet
+            output_size: Output size (1 for regression, 7 for quantiles). If None, uses config or default.
+            loss: Loss function. If None, uses config or default.
+            config: Config dict for task mode inference
+        """
         if training_data is None:
             training_data = self.training_data
         
@@ -302,6 +316,47 @@ class TFTModel:
         
         logger.info("Building TFT model...")
         
+        # Determine task mode and output_size/loss
+        from utils.model_contracts import infer_task_mode, get_loss_for_mode, validate_tft_contract
+        
+        # Get config if available
+        if config is None:
+            config = {}
+        
+        # Determine output_size
+        if output_size is None:
+            task_config = config.get('task', {})
+            if isinstance(task_config, dict) and 'mode' in task_config:
+                mode = task_config['mode']
+                if mode == 'regression':
+                    output_size = 1
+                elif mode == 'quantile':
+                    output_size = 7  # Default 7 quantiles
+                else:
+                    output_size = 1  # Default to regression
+            else:
+                # Default: quantile mode (backward compatible)
+                output_size = 7
+        
+        # Determine loss
+        if loss is None:
+            task_config = config.get('task', {})
+            if isinstance(task_config, dict) and 'mode' in task_config:
+                mode = task_config['mode']
+                quantiles = task_config.get('quantiles', None)
+                loss = get_loss_for_mode(mode, quantiles)
+            else:
+                # Default: QuantileLoss (backward compatible)
+                loss = QuantileLoss()
+        
+        # Validate contract
+        mode = infer_task_mode(config, output_size, loss.__class__.__name__)
+        is_valid, error_msg = validate_tft_contract(output_size, loss, mode, config)
+        if not is_valid:
+            raise ValueError(f"TFT Contract Validation Failed: {error_msg}")
+        
+        logger.info(f"Building TFT with mode={mode}, output_size={output_size}, loss={loss.__class__.__name__}")
+        
         self.model = TemporalFusionTransformer.from_dataset(
             training_data,
             learning_rate=self.learning_rate,
@@ -309,14 +364,18 @@ class TFTModel:
             attention_head_size=self.attention_head_size,
             dropout=self.dropout,
             hidden_continuous_size=self.hidden_size,
-            output_size=7,  # 7 quantiles for probabilistic prediction
-            loss=QuantileLoss(),
+            output_size=output_size,
+            loss=loss,
             log_interval=10,
             reduce_on_plateau_patience=4,
         )
         
         self.model.to(self.device)
         logger.info(f"TFT model built with {sum(p.numel() for p in self.model.parameters())} parameters")
+        
+        # Store mode for later use
+        self.task_mode = mode
+        self.output_size = output_size
         
         return self.model
     
@@ -438,25 +497,28 @@ class TFTModel:
                     raise
                 
                 # ====================================================================
-                # CRITICAL FIX: Move only tensors in x dictionary to device
+                # CRITICAL FIX: Move entire batch to device recursively
                 # ====================================================================
-                x = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in x.items()}
+                from utils.device import move_to_device
+                device = next(self.model.parameters()).device
+                batch = move_to_device((x, y), device)
+                x, y = batch
                 
                 # ====================================================================
                 # CRITICAL FIX: Extract target tensor from y (handles tuple/list)
                 # ====================================================================
                 y_true = self._extract_target_tensor(y)
-                # Move target tensor to device
-                y_true = y_true.to(self.device)
                 
                 # Forward pass
                 optimizer.zero_grad()
                 output = self.model(x)
                 
                 # ====================================================================
-                # CRITICAL FIX: Extract prediction tensor from output
+                # CRITICAL FIX: Use canonical loss computation
+                # model.loss is an nn.Module (QuantileLoss), expects tensors (pred, target)
                 # ====================================================================
-                y_pred = self._extract_prediction_tensor(output)
+                from utils.model_contracts import compute_tft_loss
+                loss = compute_tft_loss(self.model, output, y)
                 
                 # ====================================================================
                 # ONE-TIME DEBUG LOGGING (first batch only)
@@ -466,42 +528,20 @@ class TFTModel:
                     print("TFT TRAINING DEBUG (First Batch):")
                     print(f"  output type: {type(output)}")
                     print(f"  output has .prediction: {hasattr(output, 'prediction')}")
+                    if hasattr(output, 'prediction'):
+                        print(f"  output.prediction shape: {output.prediction.shape}")
                     if hasattr(output, '__dict__'):
                         print(f"  output attributes: {list(output.__dict__.keys())}")
                     print(f"  y type: {type(y)}")
                     if isinstance(y, (list, tuple)):
                         print(f"  y length: {len(y)}")
                         print(f"  y element types: {[type(item) for item in y]}")
-                    print(f"  y_true type: {type(y_true)}, shape: {y_true.shape}")
-                    print(f"  y_pred type: {type(y_pred)}, shape: {y_pred.shape}")
-                    print(f"  y_true device: {y_true.device}, y_pred device: {y_pred.device}")
+                        if len(y) > 0 and torch.is_tensor(y[0]):
+                            print(f"  y[0] shape: {y[0].shape}")
+                    print(f"  loss type: {type(loss)}, loss value: {loss.item() if torch.is_tensor(loss) else loss}")
+                    print(f"  Using compute_tft_loss (canonical path)")
                     print("=" * 60)
                     debug_logged = True
-                
-                # ====================================================================
-                # CRITICAL FIX: Compute loss correctly
-                # ====================================================================
-                # Try model.loss if it exists and is callable
-                if hasattr(self.model, 'loss') and callable(self.model.loss):
-                    try:
-                        # pytorch-forecasting loss expects (y_pred, y_true) as tensors
-                        loss = self.model.loss(y_pred, y_true)
-                    except Exception as e:
-                        logger.warning(
-                            f"model.loss() failed with: {e}. "
-                            f"Falling back to MSE loss."
-                        )
-                        # Fallback to MSE loss
-                        loss = torch.nn.functional.mse_loss(
-                            y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred,
-                            y_true.float().squeeze(-1) if y_true.dim() > 1 else y_true.float()
-                        )
-                else:
-                    # Fallback to MSE loss if model.loss doesn't exist
-                    loss = torch.nn.functional.mse_loss(
-                        y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred,
-                        y_true.float().squeeze(-1) if y_true.dim() > 1 else y_true.float()
-                    )
                 
                 # Backward pass
                 loss.backward()
@@ -533,49 +573,26 @@ class TFTModel:
                             raise
                         
                         # ====================================================================
-                        # CRITICAL FIX: Move only tensors in x dictionary to device
+                        # CRITICAL FIX: Move entire batch to device recursively
                         # ====================================================================
-                        x = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in x.items()}
+                        from utils.device import move_to_device
+                        device = next(self.model.parameters()).device
+                        batch = move_to_device((x, y), device)
+                        x, y = batch
                         
                         # ====================================================================
                         # CRITICAL FIX: Extract target tensor from y (handles tuple/list)
                         # ====================================================================
                         y_true = self._extract_target_tensor(y)
-                        # Move target tensor to device
-                        y_true = y_true.to(self.device)
                         
                         # Forward pass
                         output = self.model(x)
                         
                         # ====================================================================
-                        # CRITICAL FIX: Extract prediction tensor from output
+                        # CRITICAL FIX: Use canonical loss computation (handles quantiles)
                         # ====================================================================
-                        y_pred = self._extract_prediction_tensor(output)
-                        
-                        # ====================================================================
-                        # CRITICAL FIX: Compute loss correctly
-                        # ====================================================================
-                        # Try model.loss if it exists and is callable
-                        if hasattr(self.model, 'loss') and callable(self.model.loss):
-                            try:
-                                # pytorch-forecasting loss expects (y_pred, y_true) as tensors
-                                loss = self.model.loss(y_pred, y_true)
-                            except Exception as e:
-                                logger.warning(
-                                    f"model.loss() failed in validation with: {e}. "
-                                    f"Falling back to MSE loss."
-                                )
-                                # Fallback to MSE loss
-                                loss = torch.nn.functional.mse_loss(
-                                    y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred,
-                                    y_true.float().squeeze(-1) if y_true.dim() > 1 else y_true.float()
-                                )
-                        else:
-                            # Fallback to MSE loss if model.loss doesn't exist
-                            loss = torch.nn.functional.mse_loss(
-                                y_pred.squeeze(-1) if y_pred.dim() > 1 else y_pred,
-                                y_true.float().squeeze(-1) if y_true.dim() > 1 else y_true.float()
-                            )
+                        from utils.model_contracts import compute_tft_loss
+                        loss = compute_tft_loss(self.model, output, y)
                         val_loss += loss.item()
                         val_batches += 1
                 
@@ -638,29 +655,67 @@ class TFTModel:
         
         # Get last sequence
         x, _ = pred_dataset[0]
-        x = {k: v.unsqueeze(0).to(self.device) if isinstance(v, torch.Tensor) else v for k, v in x.items()}
+        
+        # CRITICAL FIX: Move entire batch to device recursively
+        from utils.device import move_to_device
+        device = next(self.model.parameters()).device
+        x = move_to_device(x, device)
+        # Add batch dimension if needed
+        if isinstance(x, dict):
+            x = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) and v.dim() < 2 else v for k, v in x.items()}
+        elif isinstance(x, torch.Tensor):
+            x = x.unsqueeze(0) if x.dim() < 2 else x
         
         # Predict
         with torch.no_grad():
-            predictions = self.model(x)
+            output = self.model(x)
         
-        # Extract median prediction (quantile 0.5)
-        if isinstance(predictions, tuple):
-            predictions = predictions[0]
+        # CRITICAL FIX: Use extract_prediction_tensor to handle Output objects
+        from utils.model_contracts import extract_prediction_tensor
+        predictions = extract_prediction_tensor(output)  # [B, T, Q] for quantile, [B, T] for regression
         
-        # Get predictions for next 12 candles
-        pred_values = predictions[0, :, 3].cpu().numpy()  # Index 3 is median (0.5 quantile)
+        # Validate predictions shape
+        if predictions.ndim < 2:
+            raise ValueError(f"Predictions must be at least 2D [B, T, ...], got shape: {predictions.shape}")
         
-        # Calculate confidence based on prediction variance
-        if predictions.shape[-1] > 1:
-            # Use inter-quantile range as uncertainty measure
-            q25 = predictions[0, :, 1].cpu().numpy()  # 0.25 quantile
-            q75 = predictions[0, :, 5].cpu().numpy()  # 0.75 quantile
-            uncertainty = np.mean(np.abs(q75 - q25))
-            confidence = 1.0 / (1.0 + uncertainty / np.mean(pred_values))
-            confidence = np.clip(confidence, 0.0, 1.0)
-        else:
+        # For quantile mode, extract median (quantile 0.5)
+        # For regression mode, use predictions directly
+        if predictions.ndim == 3 and predictions.shape[-1] > 1:
+            # Quantile mode: [B, T, Q] -> extract median index
+            median_idx = predictions.shape[-1] // 2  # Middle quantile (0.5)
+            pred_values = predictions[0, :, median_idx].cpu().numpy()  # [T]
+            
+            # Calculate confidence based on inter-quantile range
+            if predictions.shape[-1] >= 7:
+                # Use 0.25 and 0.75 quantiles if available
+                q25_idx = 1  # Assuming quantiles [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]
+                q75_idx = 5
+                if q25_idx < predictions.shape[-1] and q75_idx < predictions.shape[-1]:
+                    q25 = predictions[0, :, q25_idx].cpu().numpy()
+                    q75 = predictions[0, :, q75_idx].cpu().numpy()
+                    uncertainty = np.mean(np.abs(q75 - q25))
+                    confidence = 1.0 / (1.0 + uncertainty / (np.mean(np.abs(pred_values)) + 1e-8))
+                    confidence = np.clip(confidence, 0.0, 1.0)
+                else:
+                    # Fallback: use variance across quantiles
+                    pred_std = np.std(predictions[0, :, :].cpu().numpy(), axis=1).mean()
+                    confidence = 1.0 / (1.0 + pred_std / (np.mean(np.abs(pred_values)) + 1e-8))
+                    confidence = np.clip(confidence, 0.0, 1.0)
+            else:
+                # Fewer quantiles - use variance
+                pred_std = np.std(predictions[0, :, :].cpu().numpy(), axis=1).mean()
+                confidence = 1.0 / (1.0 + pred_std / (np.mean(np.abs(pred_values)) + 1e-8))
+                confidence = np.clip(confidence, 0.0, 1.0)
+        elif predictions.ndim == 2:
+            # Regression mode: [B, T] -> use directly
+            pred_values = predictions[0, :].cpu().numpy()  # [T]
+            # No quantile information for confidence - use fixed value
             confidence = 0.5
+        else:
+            raise ValueError(
+                f"Unexpected predictions shape: {predictions.shape}. "
+                f"Expected [B, T, Q] for quantile or [B, T] for regression."
+            )
         
         if return_index:
             return pred_values, confidence, df.index[-self.max_decoder_length:]

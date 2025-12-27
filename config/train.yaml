@@ -1,0 +1,83 @@
+# Training Configuration - Single Source of Truth
+coin: "BTC/USDT"
+timeframes: ["15m", "1h", "4h"]
+
+# Date range for training data
+date_range:
+  start: "2023-01-01"
+  end: "2024-12-31"
+
+# Time-based split (no random shuffle to avoid lookahead)
+split:
+  train: 0.7
+  val: 0.15
+  test: 0.15
+
+# Reproducibility
+seed: 42
+
+# Device configuration
+device: "cuda"  # Falls back to CPU if CUDA unavailable
+mixed_precision: "bf16"  # bf16 > fp16 > fp32 fallback
+
+# Training hyperparameters per timeframe
+batch_size:
+  "15m": 256
+  "1h": 256
+  "4h": 256
+
+learning_rate:
+  "15m": 1e-3
+  "1h": 1e-3
+  "4h": 1e-3
+
+epochs:
+  "15m": 20
+  "1h": 20
+  "4h": 20
+
+# Data loading
+num_workers: 0  # Windows safe default (multiprocessing issues)
+caching: true
+checkpointing: true
+
+# Training safety
+early_stopping:
+  enabled: true
+  patience: 5
+  min_delta: 1e-4
+
+grad_clip: 1.0
+
+# Model architecture (TFT)
+model:
+  hidden_size: 128
+  attention_head_size: 4
+  dropout: 0.1
+  max_encoder_length: 60
+  max_decoder_length: 12
+
+# Task configuration
+task:
+  mode: "quantile"  # "regression" or "quantile" (default: quantile for backward compatibility)
+  quantiles: [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]  # Only used if mode="quantile"
+
+# Hyperparameter Optimization (Optuna)
+hpo:
+  enabled: true
+  n_trials: 50
+  timeout_minutes: 120
+  resume: false
+  skip: false
+
+# Backtest configuration
+backtest:
+  fee_rate: 0.0004  # 0.04% taker fee
+  slippage: 0.0005  # 0.05% slippage
+  position_sizing: "fixed"  # "fixed" or "kelly"
+  position_size: 0.1  # 10% of balance
+  enable_long: true
+  enable_short: true
+  max_leverage: 1.0  # 1.0 = no leverage
+  signal_threshold: 0.01  # 1% predicted return threshold for signals
+

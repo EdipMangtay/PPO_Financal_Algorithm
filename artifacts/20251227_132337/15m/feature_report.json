@@ -1,0 +1,52 @@
+{
+  "timeframe": "15m",
+  "metadata": {
+    "feature_list": [
+      "RSI",
+      "MACD",
+      "MACD_signal",
+      "MACD_hist",
+      "ATR",
+      "BB_upper",
+      "BB_middle",
+      "BB_lower",
+      "Volume",
+      "Volume_MA",
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume",
+      "timestamp"
+    ],
+    "num_features": 16,
+    "initial_rows": 70080,
+    "final_rows": 70042,
+    "dropped_rows": 38,
+    "missing_counts": {
+      "RSI": 0,
+      "MACD": 0,
+      "MACD_signal": 0,
+      "MACD_hist": 0,
+      "ATR": 0,
+      "BB_upper": 0,
+      "BB_middle": 0,
+      "BB_lower": 0,
+      "Volume": 0,
+      "Volume_MA": 0,
+      "open": 0,
+      "high": 0,
+      "low": 0,
+      "close": 0,
+      "volume": 0,
+      "timestamp": 0
+    },
+    "target_stats": {
+      "mean": 0.0003542738912549376,
+      "std": 0.01052288326926803,
+      "min": -0.23249232492324923,
+      "max": 0.44467976908007645
+    }
+  },
+  "timestamp": "2025-12-27T13:23:38.310783"
+}

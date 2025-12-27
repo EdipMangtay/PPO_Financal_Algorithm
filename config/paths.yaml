@@ -1,0 +1,18 @@
+# Path Configuration - All file paths in one place
+
+# Data paths
+data_dir: "data/raw"
+cache_dir: "data/cache"
+processed_dir: "data/processed"
+
+# Model paths
+ckpt_dir: "models/checkpoints"
+artifacts_dir: "artifacts"
+
+# Logging
+logs_dir: "logs"
+
+# Temporary files
+temp_dir: "temp"
+
+

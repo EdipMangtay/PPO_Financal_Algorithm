@@ -11,3 +11,5 @@ SPREAD_PCT: float = 0.0002  # 0.02% bid-ask spread
 # Funding Rate (default 0, only charge if explicitly enabled)
 FUNDING_RATE: float = 0.0  # Default: no funding charges
 
+
+

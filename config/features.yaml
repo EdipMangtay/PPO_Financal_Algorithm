@@ -1,0 +1,70 @@
+# Feature Engineering Configuration
+
+# Common features across all timeframes
+features_common:
+  - "RSI"
+  - "MACD"
+  - "MACD_signal"
+  - "MACD_hist"
+  - "ATR"
+  - "BB_upper"
+  - "BB_middle"
+  - "BB_lower"
+  - "Volume_MA"
+
+# Timeframe-specific features
+features_by_timeframe:
+  "15m":
+    - "RSI"
+    - "MACD"
+    - "MACD_signal"
+    - "MACD_hist"
+    - "ATR"
+    - "BB_upper"
+    - "BB_middle"
+    - "BB_lower"
+    - "Volume"
+    - "Volume_MA"
+  "1h":
+    - "RSI"
+    - "MACD"
+    - "MACD_signal"
+    - "MACD_hist"
+    - "ATR"
+    - "BB_upper"
+    - "BB_middle"
+    - "BB_lower"
+    - "Volume"
+    - "Volume_MA"
+  "4h":
+    - "RSI"
+    - "MACD"
+    - "MACD_signal"
+    - "MACD_hist"
+    - "ATR"
+    - "BB_upper"
+    - "BB_middle"
+    - "BB_lower"
+    - "Volume"
+    - "Volume_MA"
+
+# Target configuration
+target:
+  type: "forward_return"  # forward_return or direction
+  horizon_bars:
+    "15m": 12
+    "1h": 12
+    "4h": 12
+
+# Feature engineering parameters
+feature_params:
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  atr_period: 14
+  bb_period: 20
+  bb_std: 2.0
+  volume_ma_period: 20
+
+
