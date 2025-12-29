@@ -25,10 +25,21 @@ from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.metrics import QuantileLoss, MAE
 from training.trainer import train_with_early_stopping
 from utils.seed import set_seed
-from utils.device import get_device
+from utils.device import get_device, recommend_num_workers, log_hardware_summary
 from utils.io import save_json
 
 logger = logging.getLogger(__name__)
+
+def _build_sqlite_url(db_path: Path) -> str:
+    """
+    Build a SQLite storage URL that is safe for multithreaded Optuna access.
+    
+    On Windows, SQLite enforces same-thread access by default. Appending
+    `check_same_thread=false` avoids `ProgrammingError` when Optuna spawns
+    background threads for parallel jobs or progress reporting.
+    """
+    resolved = db_path.resolve()
+    return f"sqlite:///{resolved.as_posix()}?check_same_thread=false"
 
 def objective(
     trial: optuna.Trial,
@@ -85,7 +96,8 @@ def objective(
         model.build_model(train_dataset, config=config)
         
         # Create dataloaders with OOM guard
-        num_workers = config.get('num_workers', 0)
+        worker_cap = config.get('num_workers_cap') or config.get('dataloader_max_workers')
+        num_workers = recommend_num_workers(config.get('num_workers'), hard_cap=worker_cap)
         train_loader = None
         val_loader = None
         
@@ -109,7 +121,8 @@ def objective(
                 break
             except RuntimeError as e:
                 if "out of memory" in str(e).lower() and retry < max_retries - 1:
-                    torch.cuda.empty_cache()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     current_batch = max(32, current_batch // 2)
                     trial.set_user_attr('batch_size_reduced', current_batch)
                     logger.warning(f"OOM, reducing batch to {current_batch}")
@@ -202,10 +215,12 @@ def run_optuna_hpo(
     Returns:
         Dict with best_params, best_value, study info
     """
+    log_hardware_summary(logger)
     # Setup storage
     artifacts_dir = Path(config['paths']['artifacts_dir']) / run_id / timeframe
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    storage_url = f"sqlite:///{artifacts_dir / 'optuna.db'}"
+    storage_path = artifacts_dir / 'optuna.db'
+    storage_url = _build_sqlite_url(storage_path)
     
     # Create or load study
     study_name = f"tft_{timeframe}_{run_id}"
@@ -274,4 +289,3 @@ def run_optuna_hpo(
     logger.info(f"  Trials: {best_info['n_complete']} complete, {best_info['n_pruned']} pruned, {best_info['n_failed']} failed")
     
     return best_info
-

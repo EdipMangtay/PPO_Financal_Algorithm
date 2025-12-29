@@ -19,6 +19,9 @@ import logging
 import traceback
 import random
 import math
+import platform
+
+import torch
 
 import sys
 import os
@@ -28,6 +31,7 @@ from data_engine.features import FeatureGenerator
 from env.trading_env import TradingEnv
 from models.tft import TFTModel
 from models.ppo import PPOTradingAgent
+from utils.device import log_hardware_summary
 from config import (
     INITIAL_BALANCE, 
     SCALP_TIMEFRAME,
@@ -43,6 +47,17 @@ from config import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _build_sqlite_url(db_path: Path) -> str:
+    """
+    Build a SQLite URL that allows cross-thread access.
+    
+    Optuna runs trials in parallel threads when `n_jobs>1`. On Windows,
+    SQLite enforces same-thread usage by default, which can surface as
+    `ProgrammingError: SQLite objects created in a thread can only be used in that same thread`.
+    Adding `check_same_thread=false` makes the storage safe for those threads.
+    """
+    resolved = db_path.resolve()
+    return f"sqlite:///{resolved.as_posix()}?check_same_thread=false"
 
 class TwoLayerOptimizer:
     """
@@ -70,6 +85,7 @@ class TwoLayerOptimizer:
         self.n_trials = n_trials
         self.timeout = timeout
         self.feature_generator = FeatureGenerator()
+        log_hardware_summary(logger)
         
         # Generate full feature pool
         logger.info(f"Generating feature pool for {coin} {timeframe}...")
@@ -867,9 +883,38 @@ class TwoLayerOptimizer:
         # Optuna Dashboard storage
         study_name = f'feature_optimization_{self.coin.replace("/", "_")}_{self.timeframe}'
         storage_dir = Path("optuna_studies")
-        storage_dir.mkdir(exist_ok=True)
+        storage_dir.mkdir(parents=True, exist_ok=True)
         storage_path = storage_dir / f"{study_name}.db"
-        storage_url = f"sqlite:///{storage_path}"
+        storage_url = _build_sqlite_url(storage_path)
+        
+        # On Windows or single-GPU setups, force sequential trials to avoid
+        # CUDA initialization races and SQLite thread limitations.
+        is_windows = platform.system().lower().startswith("win")
+        using_cuda = torch.cuda.is_available()
+        
+        # Allow explicit override for advanced users
+        override = os.environ.get("OPTUNA_N_JOBS_OVERRIDE")
+        if override is not None:
+            try:
+                override_val = int(override)
+                if override_val > 0:
+                    effective_n_jobs = override_val
+                else:
+                    effective_n_jobs = 1
+            except ValueError:
+                logger.warning("Invalid OPTUNA_N_JOBS_OVERRIDE=%s, falling back to defaults", override)
+                override = None
+        else:
+            effective_n_jobs = OPTUNA_N_JOBS
+            if using_cuda or is_windows:
+                # GPU-heavy trials should run sequentially for stability; CPU-only can leverage more cores.
+                effective_n_jobs = 1
+        
+        if effective_n_jobs != OPTUNA_N_JOBS:
+            logger.info(
+                f"Adjusting Optuna parallelism to {effective_n_jobs} "
+                f"(cuda_available={using_cuda}, windows={is_windows}) for stability"
+            )
         
         study = optuna.create_study(
             direction='maximize',
@@ -879,7 +924,7 @@ class TwoLayerOptimizer:
             load_if_exists=True
         )
         
-        logger.info(f"Starting optimization with {self.n_trials} trials (parallel: {OPTUNA_N_JOBS} jobs)...")
+        logger.info(f"Starting optimization with {self.n_trials} trials (parallel: {effective_n_jobs} jobs)...")
         logger.info(f"Study storage: {storage_path}")
         logger.info(f"To view live dashboard: optuna-dashboard {storage_path}")
         
@@ -888,7 +933,7 @@ class TwoLayerOptimizer:
             n_trials=self.n_trials,
             timeout=self.timeout,
             show_progress_bar=True,
-            n_jobs=OPTUNA_N_JOBS
+            n_jobs=effective_n_jobs
         )
         
         # Check results
