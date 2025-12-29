@@ -8,3 +8,4 @@ from signals.signal_4h import Signal4h
 __all__ = ['SignalBase', 'Signal15m', 'Signal1h', 'Signal4h']
 
 
+

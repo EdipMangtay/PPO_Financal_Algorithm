@@ -49,3 +49,4 @@ def plot_equity_curve(
         logger.warning(f"Failed to create plot: {e}")
 
 
+

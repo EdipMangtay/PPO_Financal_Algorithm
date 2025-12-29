@@ -20,3 +20,4 @@ class Signal4h(Signal15m):
         logger.info(f"Loaded 4h model from {model_path}")
 
 
+
