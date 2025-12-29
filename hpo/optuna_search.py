@@ -41,6 +41,82 @@ def _build_sqlite_url(db_path: Path) -> str:
     resolved = db_path.resolve()
     return f"sqlite:///{resolved.as_posix()}?check_same_thread=false"
 
+def _filter_features(df: pd.DataFrame, feature_flags: Dict) -> pd.DataFrame:
+    """
+    Filter features based on Optuna-selected feature group flags.
+    
+    Feature Groups:
+    - Oscillators: RSI, STOCH, CCI, WilliamsR, MFI
+    - Moving Averages: EMA, SMA, linreg
+    - Volatility: ATR, BB (Bollinger Bands), KC (Keltner Channels)
+    - Volume: OBV, VWAP, Volume_MA, Volume_Ratio
+    - Patterns: MACD, SuperTrend, ADX, slope, momentum
+    
+    Args:
+        df: DataFrame with all features
+        feature_flags: Dict with boolean flags for each feature group
+    
+    Returns:
+        Filtered DataFrame
+    """
+    # Base columns that are ALWAYS kept (price data, target, identifiers)
+    base_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp', 'target', 'time_idx', 'coin']
+    base_cols = [c for c in base_cols if c in df.columns]
+    
+    # Get all feature columns
+    all_features = [c for c in df.columns if c not in base_cols]
+    
+    # If no features to filter, return as-is
+    if not all_features:
+        return df
+    
+    # Columns to KEEP (start with base columns)
+    keep_cols = set(base_cols)
+    
+    # Feature group patterns (case-insensitive matching)
+    oscillator_patterns = ['rsi', 'stoch', 'cci', 'williamsr', 'mfi']
+    ma_patterns = ['ema', 'sma', 'linreg', 'intercept', 'rsquared']
+    volatility_patterns = ['atr', 'bb_', 'kc_', 'volatility']
+    volume_patterns = ['obv', 'vwap', 'volume_ma', 'volume_ratio']
+    pattern_patterns = ['macd', 'supertrend', 'adx', 'slope', 'momentum', 'cross', 'dist_', 'strong_momentum']
+    
+    # Apply filters
+    for col in all_features:
+        col_lower = col.lower()
+        
+        # Check each feature group
+        if feature_flags.get('use_oscillators', True):
+            if any(pattern in col_lower for pattern in oscillator_patterns):
+                keep_cols.add(col)
+                continue
+        
+        if feature_flags.get('use_moving_averages', True):
+            if any(pattern in col_lower for pattern in ma_patterns):
+                keep_cols.add(col)
+                continue
+        
+        if feature_flags.get('use_volatility', True):
+            if any(pattern in col_lower for pattern in volatility_patterns):
+                keep_cols.add(col)
+                continue
+        
+        if feature_flags.get('use_volume', True):
+            if any(pattern in col_lower for pattern in volume_patterns):
+                keep_cols.add(col)
+                continue
+        
+        if feature_flags.get('use_patterns', True):
+            if any(pattern in col_lower for pattern in pattern_patterns):
+                keep_cols.add(col)
+                continue
+        
+        # Price-based features (price_change, price_high, price_low) - always keep
+        if 'price_' in col_lower:
+            keep_cols.add(col)
+    
+    # Return filtered DataFrame
+    return df[list(keep_cols)]
+
 def objective(
     trial: optuna.Trial,
     timeframe: str,
@@ -56,7 +132,27 @@ def objective(
         Score to maximize (negative MAE for regression)
     """
     try:
-        # Suggest hyperparameters
+        # ====================================================================
+        # FEATURE SELECTION FLAGS (NEW: Reduce noise by selecting feature groups)
+        # ====================================================================
+        use_oscillators = trial.suggest_categorical('use_oscillators', [True, False])
+        use_moving_averages = trial.suggest_categorical('use_moving_averages', [True, False])
+        use_volatility = trial.suggest_categorical('use_volatility', [True, False])
+        use_volume = trial.suggest_categorical('use_volume', [True, False])
+        use_patterns = trial.suggest_categorical('use_patterns', [True, False])
+        
+        # Store feature flags for later use
+        feature_flags = {
+            'use_oscillators': use_oscillators,
+            'use_moving_averages': use_moving_averages,
+            'use_volatility': use_volatility,
+            'use_volume': use_volume,
+            'use_patterns': use_patterns
+        }
+        
+        # ====================================================================
+        # MODEL HYPERPARAMETERS
+        # ====================================================================
         lr = trial.suggest_float('lr', 1e-5, 5e-3, log=True)
         batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])  # Reduced for CPU safety
         dropout = trial.suggest_float('dropout', 0.0, 0.5)
@@ -85,9 +181,25 @@ def objective(
             device=device
         )
         
+        # ====================================================================
+        # APPLY FEATURE SELECTION (Filter features based on Optuna flags)
+        # ====================================================================
+        train_data_filtered = _filter_features(train_data.copy(), feature_flags)
+        val_data_filtered = _filter_features(val_data.copy(), feature_flags)
+        
+        # Log feature selection
+        original_features = len([c for c in train_data.columns if c not in ['open', 'high', 'low', 'close', 'volume', 'timestamp', 'target', 'time_idx', 'coin']])
+        filtered_features = len([c for c in train_data_filtered.columns if c not in ['open', 'high', 'low', 'close', 'volume', 'timestamp', 'target', 'time_idx', 'coin']])
+        logger.info(f"Trial {trial.number} Feature Selection: {original_features} -> {filtered_features} features")
+        logger.info(f"  Flags: {feature_flags}")
+        
+        # Store feature count for analysis
+        trial.set_user_attr('n_features_original', original_features)
+        trial.set_user_attr('n_features_selected', filtered_features)
+        
         # Create datasets
-        train_dict = {coin: train_data}
-        val_dict = {coin: val_data}
+        train_dict = {coin: train_data_filtered}
+        val_dict = {coin: val_data_filtered}
         
         train_dataset = model.create_dataset(train_dict, target='target')
         val_dataset = model.create_dataset(val_dict, target='target')
@@ -159,27 +271,132 @@ def objective(
             checkpoint_dir=None  # No checkpointing during HPO
         )
         
-        # Get validation loss
-        if history['val_loss'] and len(history['val_loss']) > 0:
-            # Get best validation loss (lowest, most recent valid)
-            val_losses_clean = [v for v in history['val_loss'] if np.isfinite(v)]
-            if not val_losses_clean:
-                trial.set_user_attr('nan_loss', True)
-                raise optuna.TrialPruned("All validation losses are NaN")
-            
-            val_loss = val_losses_clean[-1]  # Use last valid loss
-            
-            # Report intermediate value for pruning
-            trial.report(val_loss, step=len(val_losses_clean))
-            
-            # Check if should prune
-            if trial.should_prune():
-                raise optuna.TrialPruned()
-            
-            # Return negative loss (to maximize, since Optuna maximizes)
-            return -val_loss
-        else:
+        # ====================================================================
+        # STRATEGIC CHANGE: From "Academic Loss" to "Financial Profitability"
+        # ====================================================================
+        # We now evaluate models based on:
+        # 1. Directional Accuracy (DA): Does the model predict price direction correctly?
+        # 2. Proxy PnL: Simulated profit/loss based on directional predictions
+        # 3. QuantileLoss: Still used as a constraint (not primary objective)
+        # ====================================================================
+        
+        if not history['val_loss'] or len(history['val_loss']) == 0:
             raise ValueError("No validation loss computed")
+        
+        # Get validation loss (for composite score)
+        val_losses_clean = [v for v in history['val_loss'] if np.isfinite(v)]
+        if not val_losses_clean:
+            trial.set_user_attr('nan_loss', True)
+            raise optuna.TrialPruned("All validation losses are NaN")
+        
+        val_loss = val_losses_clean[-1]  # Use last valid loss
+        
+        # ====================================================================
+        # COMPUTE FINANCIAL METRICS on Validation Set
+        # ====================================================================
+        model.model.eval()  # Set PyTorch model to eval mode
+        predictions_list = []
+        targets_list = []
+        
+        with torch.no_grad():
+            from utils.device import move_to_device
+            model_device = next(model.model.parameters()).device
+            
+            for batch in val_loader:
+                batch = move_to_device(batch, model_device)
+                x, y = batch
+                
+                # Get prediction
+                output = model.model(x)
+                
+                # Extract prediction and target tensors
+                from utils.model_contracts import extract_prediction_tensor, extract_target_tensor
+                pred = extract_prediction_tensor(output)
+                target = extract_target_tensor(y)
+                
+                # For quantile models, use median (index 3 of 7 quantiles, or middle)
+                if pred.dim() == 3 and pred.shape[-1] > 1:
+                    # Shape: [batch, horizon, quantiles] -> use median quantile
+                    median_idx = pred.shape[-1] // 2
+                    pred_median = pred[:, :, median_idx]  # [batch, horizon]
+                else:
+                    pred_median = pred.squeeze(-1) if pred.dim() > 2 else pred
+                
+                # Use first timestep of prediction horizon for direction
+                if pred_median.dim() > 1:
+                    pred_t1 = pred_median[:, 0]  # First horizon step
+                else:
+                    pred_t1 = pred_median
+                
+                # Target: use first timestep
+                if target.dim() > 1:
+                    target_t1 = target[:, 0]
+                else:
+                    target_t1 = target
+                
+                predictions_list.append(pred_t1.cpu().numpy())
+                targets_list.append(target_t1.cpu().numpy())
+        
+        # Concatenate all batches
+        predictions = np.concatenate(predictions_list)
+        targets = np.concatenate(targets_list)
+        
+        # ====================================================================
+        # METRIC 1: Directional Accuracy (DA)
+        # ====================================================================
+        # Predicted direction: sign(prediction)
+        # Actual direction: sign(target return)
+        pred_direction = np.sign(predictions)
+        true_direction = np.sign(targets)
+        
+        directional_accuracy = np.mean(pred_direction == true_direction)
+        
+        # ====================================================================
+        # METRIC 2: Proxy PnL
+        # ====================================================================
+        # Logic: If model predicts UP (+1) and price goes UP (positive return), gain = return
+        #        If model predicts DOWN (-1) and price goes DOWN (negative return), gain = -return (short profit)
+        #        Otherwise, loss
+        proxy_pnl_per_trade = predictions * targets  # Element-wise: prediction magnitude * actual return
+        proxy_pnl_total = np.sum(proxy_pnl_per_trade)
+        proxy_pnl_mean = np.mean(proxy_pnl_per_trade)
+        
+        # ====================================================================
+        # COMPOSITE SCORE (Optuna will MAXIMIZE this)
+        # ====================================================================
+        # Formula: (DA * 2.0) + (Proxy_PnL * 5.0) - (QuantileLoss * 0.5)
+        # Rationale:
+        # - Directional accuracy is weighted 2x (binary correctness)
+        # - Proxy PnL is weighted 5x (magnitude of profit)
+        # - Loss is penalized 0.5x (still important but secondary)
+        composite_score = (directional_accuracy * 2.0) + (proxy_pnl_mean * 5.0) - (val_loss * 0.5)
+        
+        # ====================================================================
+        # LOGGING & REPORTING
+        # ====================================================================
+        logger.info(f"Trial {trial.number} Financial Metrics:")
+        logger.info(f"  Directional Accuracy: {directional_accuracy:.4f} ({directional_accuracy*100:.2f}%)")
+        logger.info(f"  Proxy PnL (mean): {proxy_pnl_mean:.6f}")
+        logger.info(f"  Proxy PnL (total): {proxy_pnl_total:.6f}")
+        logger.info(f"  Validation Loss: {val_loss:.6f}")
+        logger.info(f"  Composite Score: {composite_score:.6f}")
+        
+        # Store metrics as trial attributes for Optuna Dashboard
+        trial.set_user_attr('directional_accuracy', float(directional_accuracy))
+        trial.set_user_attr('proxy_pnl_mean', float(proxy_pnl_mean))
+        trial.set_user_attr('proxy_pnl_total', float(proxy_pnl_total))
+        trial.set_user_attr('val_loss', float(val_loss))
+        trial.set_user_attr('composite_score', float(composite_score))
+        
+        # Report composite score for pruning (higher is better)
+        trial.report(composite_score, step=len(val_losses_clean))
+        
+        # Check if should prune
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+        
+        # Return composite score (Optuna will maximize this)
+        return composite_score
     
     except optuna.TrialPruned:
         raise
