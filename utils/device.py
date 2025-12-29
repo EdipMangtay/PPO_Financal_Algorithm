@@ -5,6 +5,8 @@ Device Utilities - GPU/CPU detection and selection
 import logging
 from typing import Optional, Union, Dict, List, Tuple, Any
 import numpy as np
+import os
+import platform
 
 # Optional torch import
 try:
@@ -15,6 +17,86 @@ except ImportError:
     torch = None
 
 logger = logging.getLogger(__name__)
+
+def log_hardware_summary(log: Optional[logging.Logger] = None) -> Dict[str, Any]:
+    """
+    Log and return a quick hardware summary (CPU/GPU/memory).
+    
+    Designed to run safely on Windows and Linux without extra dependencies.
+    """
+    summary: Dict[str, Any] = {
+        "cpu_count": os.cpu_count(),
+        "platform": platform.platform(),
+        "python": platform.python_version()
+    }
+    
+    if TORCH_AVAILABLE and torch is not None:
+        summary["cuda_available"] = torch.cuda.is_available()
+        if torch.cuda.is_available():
+            summary["cuda_device_name"] = torch.cuda.get_device_name(0)
+            summary["cuda_device_count"] = torch.cuda.device_count()
+            summary["cuda_capability"] = torch.cuda.get_device_capability(0)
+            try:
+                summary["vram_gb_total"] = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            except Exception:
+                summary["vram_gb_total"] = None
+        else:
+            summary["cuda_device_name"] = None
+            summary["cuda_device_count"] = 0
+            summary["cuda_capability"] = None
+    else:
+        summary["cuda_available"] = False
+        summary["cuda_device_name"] = None
+        summary["cuda_device_count"] = 0
+        summary["cuda_capability"] = None
+    
+    if log:
+        log.info(
+            "SYSTEM SUMMARY | CPU: %s cores | Platform: %s | Python: %s | CUDA: %s | GPU: %s | Devices: %s | VRAM: %s GB",
+            summary["cpu_count"],
+            summary["platform"],
+            summary["python"],
+            summary["cuda_available"],
+            summary["cuda_device_name"],
+            summary["cuda_device_count"],
+            f"{summary['vram_gb_total']:.1f}" if summary.get("vram_gb_total") else "N/A"
+        )
+    return summary
+
+def recommend_num_workers(
+    requested: Optional[int] = None,
+    gpu_limit: int = 8,
+    hard_cap: Optional[int] = None
+) -> int:
+    """
+    Recommend a DataLoader worker count based on CPU cores and GPU presence.
+    
+    Args:
+        requested: User-provided worker count. If None/negative, auto-select.
+        gpu_limit: Upper bound when GPU is available to avoid dataloader overhead.
+        hard_cap: Optional ceiling (e.g., from config) applied after auto-selection.
+    """
+    # Highest priority: explicit override via env for fast experimentation
+    env_override = os.environ.get("DATALOADER_WORKERS")
+    if env_override is not None:
+        try:
+            override_val = int(env_override)
+            if override_val >= 0:
+                return override_val if hard_cap is None else min(override_val, hard_cap)
+        except ValueError:
+            logger.warning("Invalid DATALOADER_WORKERS override: %s", env_override)
+    
+    if requested is not None and requested >= 0:
+        value = max(0, requested)
+        return value if hard_cap is None else min(value, hard_cap)
+    
+    cpu_count = os.cpu_count() or 1
+    if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
+        value = max(1, min(gpu_limit, cpu_count // 2 or 1))
+    else:
+        value = max(1, cpu_count // 2 or 1)
+    
+    return value if hard_cap is None else min(value, hard_cap)
 
 def get_device(requested: Optional[str] = None) -> str:
     """
@@ -245,4 +327,3 @@ def model_device_sanity_check(
         import traceback
         errors.append(f"Traceback: {traceback.format_exc()}")
         return False, errors
-
