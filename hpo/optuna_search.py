@@ -28,7 +28,68 @@ from utils.seed import set_seed
 from utils.device import get_device, recommend_num_workers, log_hardware_summary
 from utils.io import save_json
 
+# ============================================================================
+# SYSTEM GUARD: Prevent CPU saturation on Windows (Intel Ultra + USB freeze)
+# ============================================================================
+# PyTorch's internal thread pools can saturate all CPU cores, preventing
+# OS interrupts (USB, Bluetooth, etc.) from being serviced. This causes
+# system freezing on Windows 11 with high-core-count CPUs.
+# 
+# Solution: Limit intra-op (BLAS operations) and inter-op (parallel ops) threads
+# to leave headroom for OS scheduler and device drivers.
+# 
+# Note: These can only be set once per process. If already set (e.g., in
+# verification scripts), we skip to avoid RuntimeError.
+# ============================================================================
+try:
+    torch.set_num_threads(4)           # Intra-op parallelism (matrix ops)
+    torch.set_num_interop_threads(2)   # Inter-op parallelism (parallel operations)
+except RuntimeError as e:
+    # Already set - this is OK (likely called from verification or parent script)
+    if "cannot set number" not in str(e):
+        raise
+
 logger = logging.getLogger(__name__)
+
+def _cleanup_trial_resources(model=None, optimizer=None, train_loader=None, val_loader=None):
+    """
+    Aggressive memory cleanup to prevent leaks and CPU/GPU saturation.
+    
+    CRITICAL for Windows stability: Ensures OS can reclaim resources between trials.
+    Without this, repeated trials cause memory bloat and system freezing.
+    
+    Args:
+        model: TFTModel instance (or None)
+        optimizer: PyTorch optimizer (or None)
+        train_loader: DataLoader (or None)
+        val_loader: DataLoader (or None)
+    """
+    import gc
+    
+    # Delete loaders first (they hold references to datasets)
+    if train_loader is not None:
+        del train_loader
+    if val_loader is not None:
+        del val_loader
+    
+    # Delete optimizer (holds model parameter references)
+    if optimizer is not None:
+        del optimizer
+    
+    # Delete model last
+    if model is not None:
+        # If it's a TFTModel wrapper, delete the inner model too
+        if hasattr(model, 'model'):
+            del model.model
+        del model
+    
+    # Force CUDA cache flush (if available)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()  # Wait for GPU operations to complete
+    
+    # Force Python garbage collection (reclaim cyclic references)
+    gc.collect()
 
 def _build_sqlite_url(db_path: Path) -> str:
     """
@@ -393,18 +454,33 @@ def objective(
         
         # Check if should prune
         if trial.should_prune():
+            # ====================================================================
+            # AGGRESSIVE CLEANUP: Free memory before pruning
+            # ====================================================================
+            _cleanup_trial_resources(model, optimizer, train_loader, val_loader)
             raise optuna.TrialPruned()
+        
+        # ====================================================================
+        # AGGRESSIVE CLEANUP: Free memory before returning (success case)
+        # ====================================================================
+        _cleanup_trial_resources(model, optimizer, train_loader, val_loader)
         
         # Return composite score (Optuna will maximize this)
         return composite_score
     
     except optuna.TrialPruned:
+        # Cleanup before re-raising
+        _cleanup_trial_resources(locals().get('model'), locals().get('optimizer'), 
+                                 locals().get('train_loader'), locals().get('val_loader'))
         raise
     except RuntimeError as e:
         error_str = str(e).lower()
         if "out of memory" in error_str or "cuda" in error_str and "memory" in error_str:
             trial.set_user_attr('oom', True)
             logger.warning(f"Trial {trial.number} OOM, pruning...")
+            # AGGRESSIVE CLEANUP: Critical for OOM recovery
+            _cleanup_trial_resources(locals().get('model'), locals().get('optimizer'), 
+                                     locals().get('train_loader'), locals().get('val_loader'))
             raise optuna.TrialPruned("OOM")
         raise
     except Exception as e:
@@ -412,6 +488,9 @@ def objective(
         logger.error(f"Trial {trial.number} failed: {error_msg}")
         logger.error(traceback.format_exc())
         trial.set_user_attr('error', error_msg)
+        # AGGRESSIVE CLEANUP: Prevent memory leaks on failure
+        _cleanup_trial_resources(locals().get('model'), locals().get('optimizer'), 
+                                 locals().get('train_loader'), locals().get('val_loader'))
         # Mark as pruned instead of failing to avoid crashing the study
         raise optuna.TrialPruned(f"Trial failed: {error_msg}")
 

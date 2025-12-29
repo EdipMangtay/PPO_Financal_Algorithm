@@ -37,7 +37,9 @@ epochs:
   "4h": 20
 
 # Data loading
-num_workers: 0  # Windows safe default (multiprocessing issues)
+# CRITICAL: num_workers MUST be 0 on Windows to prevent CPU saturation and USB/Bluetooth freezing
+# PyTorch multiprocessing (spawn) on Windows causes OS interrupt starvation
+num_workers: 0  # Windows safe default - DO NOT CHANGE
 caching: true
 checkpointing: true
 
