@@ -64,6 +64,13 @@ task:
   mode: "quantile"  # "regression" or "quantile" (default: quantile for backward compatibility)
   quantiles: [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]  # Only used if mode="quantile"
 
+# Target configuration (MOMENTUM STRATEGY)
+target:
+  name: "log_return"  # Predict log returns instead of price
+  normalization: "standard"  # StandardScaler for returns (stationary)
+  # Note: GroupNormalizer is for non-stationary data (prices)
+  #       StandardScaler is for stationary data (returns)
+
 # Hyperparameter Optimization (Optuna)
 hpo:
   enabled: true
@@ -73,14 +80,14 @@ hpo:
   skip: false
   n_jobs: 1  # Sequential trials for CPU safety (set to 2 if you have 8+ cores)
 
-# Backtest configuration
+# Backtest configuration (MOMENTUM STRATEGY - 5x Leverage)
 backtest:
   fee_rate: 0.0004  # 0.04% taker fee
   slippage: 0.0005  # 0.05% slippage
   position_sizing: "fixed"  # "fixed" or "kelly"
-  position_size: 0.1  # 10% of balance
+  position_size: 0.2  # 20% of balance (higher for active trading)
   enable_long: true
   enable_short: true
-  max_leverage: 1.0  # 1.0 = no leverage
-  signal_threshold: 0.01  # 1% predicted return threshold for signals
+  max_leverage: 5.0  # 5x leverage (AGGRESSIVE MOMENTUM TRADING)
+  signal_threshold: 0.0002  # 0.02% predicted return threshold (noise filter)
 

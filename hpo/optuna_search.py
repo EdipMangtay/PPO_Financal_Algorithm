@@ -220,10 +220,14 @@ def objective(
         hidden_size = trial.suggest_categorical('hidden_size', [64, 128, 256, 512])
         weight_decay = trial.suggest_float('weight_decay', 1e-8, 1e-2, log=True)
         
-        # Model config
-        model_config = config.get('model', {})
-        max_encoder_length = model_config.get('max_encoder_length', 60)
-        max_decoder_length = model_config.get('max_decoder_length', 12)
+        # ====================================================================
+        # CONTEXT WINDOW OPTIMIZATION (For Momentum/Returns)
+        # ====================================================================
+        # Returns are noisier than prices, model needs more context to find patterns
+        # Allow model to look back 24-168 steps (1 day to 1 week in hourly data)
+        # Keep prediction short (1-2 steps) for active trading
+        max_encoder_length = trial.suggest_int('max_encoder_length', 24, 168, step=12)
+        max_decoder_length = trial.suggest_int('max_decoder_length', 1, 3)  # Short-term momentum
         
         # Set seed for reproducibility
         seed = config.get('seed', 42) + trial.number
@@ -413,37 +417,79 @@ def objective(
         directional_accuracy = np.mean(pred_direction == true_direction)
         
         # ====================================================================
-        # METRIC 2: Proxy PnL
+        # HUNTER REWARD SYSTEM: 5x Leverage + Trailing Stop Simulation
         # ====================================================================
-        # Logic: If model predicts UP (+1) and price goes UP (positive return), gain = return
-        #        If model predicts DOWN (-1) and price goes DOWN (negative return), gain = -return (short profit)
-        #        Otherwise, loss
-        proxy_pnl_per_trade = predictions * targets  # Element-wise: prediction magnitude * actual return
-        proxy_pnl_total = np.sum(proxy_pnl_per_trade)
-        proxy_pnl_mean = np.mean(proxy_pnl_per_trade)
+        # Strategy: Active momentum trading with leverage
+        # Goal: Maximize profit on big moves, avoid noise
+        # 
+        # Components:
+        # 1. Trading Threshold (0.02% noise filter)
+        # 2. 5x Leverage on correct directions
+        # 3. Trailing Stop Bonus (1.5x multiplier on big moves)
+        # 4. Inactivity Penalty (force model to trade)
+        # ====================================================================
+        
+        # 1. Trading Threshold (avoid noise)
+        THRESHOLD = 0.0002  # 0.02% minimum move to trade
+        trade_active = np.abs(predictions) > THRESHOLD
+        
+        # 2. Direction-based PnL (sign matching)
+        pred_direction = np.sign(predictions)
+        raw_pnl = pred_direction * targets  # Correct direction = positive PnL
+        
+        # 3. Apply 5x Leverage
+        leveraged_pnl = raw_pnl * 5.0
+        
+        # 4. Trailing Stop Reward (Big Move Bonus)
+        # If actual move > 0.5% AND we were correct, apply 1.5x multiplier
+        # This simulates "letting winners run" with a trailing stop
+        big_move_mask = (np.abs(targets) > 0.005) & (raw_pnl > 0)
+        
+        final_scores = leveraged_pnl.copy()
+        final_scores[big_move_mask] *= 1.5  # Rocket bonus!
+        
+        # 5. Calculate metrics only on active trades
+        num_trades = int(np.sum(trade_active))
+        
+        if num_trades > 0:
+            active_scores = final_scores[trade_active]
+            proxy_pnl_total = float(np.sum(active_scores))
+            proxy_pnl_mean = float(np.mean(active_scores))
+            win_rate = float(np.mean(active_scores > 0))
+        else:
+            proxy_pnl_total = 0.0
+            proxy_pnl_mean = 0.0
+            win_rate = 0.0
+        
+        # 6. Inactivity Penalty
+        # Model must trade at least 5% of opportunities
+        min_trades = int(len(predictions) * 0.05)
+        
+        if num_trades < min_trades:
+            # Severely penalize inactive models
+            composite_score = -999.0
+            logger.warning(f"Trial {trial.number} INACTIVE: {num_trades} trades < {min_trades} minimum")
+        else:
+            # Composite Score = Total Leveraged PnL - Loss Penalty
+            # We want models that make money, not just low loss
+            composite_score = proxy_pnl_total - (val_loss * 10.0)
         
         # ====================================================================
-        # COMPOSITE SCORE (Optuna will MAXIMIZE this)
+        # LOGGING & REPORTING (Hunter Metrics)
         # ====================================================================
-        # Formula: (DA * 2.0) + (Proxy_PnL * 5.0) - (QuantileLoss * 0.5)
-        # Rationale:
-        # - Directional accuracy is weighted 2x (binary correctness)
-        # - Proxy PnL is weighted 5x (magnitude of profit)
-        # - Loss is penalized 0.5x (still important but secondary)
-        composite_score = (directional_accuracy * 2.0) + (proxy_pnl_mean * 5.0) - (val_loss * 0.5)
-        
-        # ====================================================================
-        # LOGGING & REPORTING
-        # ====================================================================
-        logger.info(f"Trial {trial.number} Financial Metrics:")
+        logger.info(f"Trial {trial.number} Hunter Metrics:")
         logger.info(f"  Directional Accuracy: {directional_accuracy:.4f} ({directional_accuracy*100:.2f}%)")
-        logger.info(f"  Proxy PnL (mean): {proxy_pnl_mean:.6f}")
-        logger.info(f"  Proxy PnL (total): {proxy_pnl_total:.6f}")
+        logger.info(f"  Active Trades: {num_trades} / {len(predictions)} ({num_trades/len(predictions)*100:.1f}%)")
+        logger.info(f"  Win Rate: {win_rate:.4f} ({win_rate*100:.2f}%)")
+        logger.info(f"  Proxy PnL (5x leveraged, mean): {proxy_pnl_mean:.6f}")
+        logger.info(f"  Proxy PnL (5x leveraged, total): {proxy_pnl_total:.6f}")
         logger.info(f"  Validation Loss: {val_loss:.6f}")
         logger.info(f"  Composite Score: {composite_score:.6f}")
         
         # Store metrics as trial attributes for Optuna Dashboard
         trial.set_user_attr('directional_accuracy', float(directional_accuracy))
+        trial.set_user_attr('num_trades', num_trades)
+        trial.set_user_attr('win_rate', win_rate)
         trial.set_user_attr('proxy_pnl_mean', float(proxy_pnl_mean))
         trial.set_user_attr('proxy_pnl_total', float(proxy_pnl_total))
         trial.set_user_attr('val_loss', float(val_loss))

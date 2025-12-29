@@ -495,6 +495,41 @@ class FeatureGenerator:
         feature_count = len([c for c in df.columns if c not in base_cols])
         logger.info(f"Generated {feature_count} candidate features (all shifted by 1 to prevent look-ahead bias)")
         
+        # ====================================================================
+        # TARGET CALCULATION: LOG RETURNS (Momentum Strategy)
+        # ====================================================================
+        # Switch from "Price Prediction" to "Return Prediction"
+        # 
+        # Why Log Returns?
+        # - Stationary (constant mean/variance)
+        # - Captures % changes (leverage-friendly)
+        # - Symmetric for long/short
+        # - Comparable across different price levels
+        # 
+        # Formula: log_return(t) = ln(close(t)) - ln(close(t-1))
+        # Target: Predict log_return at t+1 (shift(-1))
+        # ====================================================================
+        logger.info("Calculating LOG RETURNS target...")
+        
+        # Calculate log returns
+        df['log_return'] = np.log(df['close']).diff()
+        
+        # Shift to predict NEXT period (t+1)
+        # At time t, we predict log_return at t+1
+        df['log_return'] = df['log_return'].shift(-1)
+        
+        # Set as target
+        df['target'] = df['log_return']
+        
+        # CRITICAL: Drop NaN rows (first row from diff, last row from shift(-1))
+        initial_rows = len(df)
+        df = df.dropna(subset=['target'])
+        dropped_rows = initial_rows - len(df)
+        
+        logger.info(f"Log returns calculated: {len(df)} valid samples (dropped {dropped_rows} NaN)")
+        logger.info(f"Target statistics: mean={df['target'].mean():.6f}, std={df['target'].std():.6f}")
+        logger.info(f"Target range: [{df['target'].min():.6f}, {df['target'].max():.6f}]")
+        
         return df
     
     def get_feature_list(self, df: pd.DataFrame) -> List[str]:
