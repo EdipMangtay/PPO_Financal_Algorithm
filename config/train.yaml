@@ -69,6 +69,7 @@ hpo:
   timeout_minutes: 120
   resume: false
   skip: false
+  n_jobs: 1  # Sequential trials for CPU safety (set to 2 if you have 8+ cores)
 
 # Backtest configuration
 backtest:

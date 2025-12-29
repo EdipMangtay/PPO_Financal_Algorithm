@@ -58,7 +58,7 @@ def objective(
     try:
         # Suggest hyperparameters
         lr = trial.suggest_float('lr', 1e-5, 5e-3, log=True)
-        batch_size = trial.suggest_categorical('batch_size', [64, 128, 256, 512])
+        batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])  # Reduced for CPU safety
         dropout = trial.suggest_float('dropout', 0.0, 0.5)
         hidden_size = trial.suggest_categorical('hidden_size', [64, 128, 256, 512])
         weight_decay = trial.suggest_float('weight_decay', 1e-8, 1e-2, log=True)
@@ -248,12 +248,16 @@ def run_optuna_hpo(
     timeout_seconds = timeout_minutes * 60 if timeout_minutes else None
     start_time = time.time()
     
+    # Get n_jobs from config (default to 1 for sequential to avoid CPU overload)
+    optuna_n_jobs = config.get('hpo', {}).get('n_jobs', 1)
+    
     try:
         study.optimize(
             lambda trial: objective(trial, timeframe, train_data, val_data, config, coin),
             n_trials=n_trials,
             timeout=timeout_seconds,
-            show_progress_bar=True
+            show_progress_bar=True,
+            n_jobs=optuna_n_jobs  # Sequential by default for CPU safety
         )
     except KeyboardInterrupt:
         logger.info("Optuna optimization interrupted")

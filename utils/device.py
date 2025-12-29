@@ -3,7 +3,10 @@ Device Utilities - GPU/CPU detection and selection
 """
 
 import logging
-from typing import Optional, Union, Dict, List, Tuple, Any
+from typing import Optional, Union, Dict, List, Tuple, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 import numpy as np
 import os
 import platform
@@ -148,7 +151,7 @@ def get_device_info(device: str) -> dict:
 
 def move_to_device(
     batch: Any,
-    device: Union[str, torch.device],
+    device: Union[str, Any],  # torch.device if torch available
     non_blocking: bool = True
 ) -> Any:
     """
@@ -199,7 +202,7 @@ def move_to_device(
 
 def find_device_mismatches(
     batch: Any,
-    expected_device: Union[str, torch.device],
+    expected_device: Union[str, Any],  # torch.device if torch available
     path: str = "root"
 ) -> List[str]:
     """
@@ -260,9 +263,9 @@ def find_device_mismatches(
 
 
 def model_device_sanity_check(
-    model: torch.nn.Module,
-    dataloader: torch.utils.data.DataLoader,
-    device: Optional[Union[str, torch.device]] = None
+    model: Any,  # torch.nn.Module if torch available
+    dataloader: Any,  # torch.utils.data.DataLoader if torch available
+    device: Optional[Union[str, Any]] = None  # torch.device if torch available
 ) -> Tuple[bool, List[str]]:
     """
     Sanity check that model forward pass works with batch on correct device.
