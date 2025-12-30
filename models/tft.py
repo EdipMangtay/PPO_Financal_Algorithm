@@ -260,7 +260,7 @@ class TFTModel:
                 static_categoricals=self.static_categoricals,
                 time_varying_known_reals=known_reals,
                 time_varying_unknown_reals=unknown_reals,
-                target_normalizer=GroupNormalizer(groups=["coin"], transformation="softplus"),
+                target_normalizer=GroupNormalizer(groups=["coin"], transformation=None),  # No transformation for log returns
                 add_relative_time_idx=True,
                 add_target_scales=True,
                 add_encoder_length=True,
@@ -408,6 +408,51 @@ class TFTModel:
             f"Cannot extract prediction tensor from output type: {type(output)}. "
             f"Output attributes: {dir(output) if hasattr(output, '__dict__') else 'N/A'}"
         )
+    
+    def extract_median_quantile(self, pred_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        PROFIT-FIRST FIX: Extract 0.5 quantile (median) from TFT quantile predictions.
+        
+        For metrics and backtest, we need a single point prediction, not 7 quantiles.
+        Use the median (0.5 quantile = index 3) as the best point estimate.
+        
+        Args:
+            pred_tensor: Shape (N, decoder_len, 7) for quantiles [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]
+        
+        Returns:
+            Median predictions, shape (N, decoder_len)
+        """
+        if pred_tensor.ndim == 3 and pred_tensor.shape[-1] == 7:
+            # Extract median quantile (index 3 = 0.5)
+            return pred_tensor[:, :, 3]
+        elif pred_tensor.ndim == 2:
+            # Already single output or already extracted
+            return pred_tensor
+        else:
+            raise ValueError(f"Unexpected pred_tensor shape: {pred_tensor.shape}")
+    
+    def extract_quantile_confidence(self, pred_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        CONFIDENCE METRIC: Measure prediction uncertainty using quantile spread.
+        
+        High Confidence = Narrow spread between 0.9 and 0.1 quantiles
+        Low Confidence = Wide spread (high uncertainty, avoid trading)
+        
+        Args:
+            pred_tensor: Shape (N, decoder_len, 7)
+        
+        Returns:
+            Confidence spread, shape (N, decoder_len). Lower = More confident.
+        """
+        if pred_tensor.ndim == 3 and pred_tensor.shape[-1] == 7:
+            # Quantile indices: [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]
+            q_90 = pred_tensor[:, :, 5]  # 0.9 quantile
+            q_10 = pred_tensor[:, :, 1]  # 0.1 quantile
+            spread = torch.abs(q_90 - q_10)
+            return spread
+        else:
+            # Cannot compute spread, return zeros
+            return torch.zeros_like(pred_tensor)
     
     def _extract_target_tensor(self, y):
         """
@@ -646,7 +691,7 @@ class TFTModel:
             static_categoricals=self.static_categoricals,
             time_varying_known_reals=known_reals,
             time_varying_unknown_reals=unknown_reals,
-            target_normalizer=GroupNormalizer(groups=["coin"], transformation="softplus"),
+            target_normalizer=GroupNormalizer(groups=["coin"], transformation=None),  # No transformation for log returns
             add_relative_time_idx=True,
             add_target_scales=True,
             add_encoder_length=True,
@@ -743,7 +788,7 @@ class TFTModel:
     
     def load(self, path: str, training_data: Optional[TimeSeriesDataSet] = None):
         """Load model from disk."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         config = checkpoint['config']
         
         # Update config

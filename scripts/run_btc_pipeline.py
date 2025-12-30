@@ -290,21 +290,33 @@ def process_timeframe_training(
         with torch.no_grad():
             for batch in test_loader:
                 x, y = batch
+                # PyTorch Forecasting returns y as (targets, weights) tuple
+                if isinstance(y, tuple):
+                    y = y[0]  # Get targets only
                 x = {k: v.to(device) for k, v in x.items()}
                 y = y.to(device)
                 
                 pred = model.model(x)
-                test_predictions.append(pred.cpu().numpy())
+                # CRITICAL FIX: Extract prediction tensor properly
+                pred_tensor = model._extract_prediction_tensor(pred)
+                test_predictions.append(pred_tensor.cpu().numpy())
                 test_targets.append(y.cpu().numpy())
         
         test_predictions = np.concatenate(test_predictions, axis=0)
         test_targets = np.concatenate(test_targets, axis=0)
         
-        # Compute metrics
-        metrics = compute_metrics(test_targets, test_predictions)
+        # PROFIT-FIRST METRICS: Compute with leverage from config
+        leverage = config.get('backtest', {}).get('max_leverage', 5.0)
+        metrics = compute_metrics(test_targets, test_predictions, leverage=leverage)
         save_json(metrics, artifacts_dir / 'metrics_test.json')
         
-        logger.info(f"✓ Test metrics: MAE={metrics['mae']:.6f}, RMSE={metrics['rmse']:.6f}, R2={metrics['r2']:.4f}")
+        # Log PROFIT metrics (priority)
+        logger.info(f"✓ PROFIT METRICS:")
+        logger.info(f"  Directional Accuracy: {metrics.get('directional_accuracy', 0):.4f} ({metrics.get('directional_accuracy', 0)*100:.2f}%)")
+        logger.info(f"  Cumulative PnL (5x): {metrics.get('pnl_cumulative', 0):.4f}")
+        logger.info(f"  Sharpe Ratio: {metrics.get('pnl_sharpe', 0):.4f}")
+        logger.info(f"  Win Rate: {metrics.get('pnl_win_rate', 0):.4f} ({metrics.get('pnl_win_rate', 0)*100:.2f}%)")
+        logger.info(f"✓ Legacy metrics: MAE={metrics.get('mae', 0):.6f}, RMSE={metrics.get('rmse', 0):.6f}, R2={metrics.get('r2', 0):.4f}")
         
         # Save predictions
         preds_df = pd.DataFrame({

@@ -212,12 +212,24 @@ def objective(
         }
         
         # ====================================================================
-        # MODEL HYPERPARAMETERS
+        # MODEL HYPERPARAMETERS (ANTI-CRASH LIMITS)
         # ====================================================================
         lr = trial.suggest_float('lr', 1e-5, 5e-3, log=True)
-        batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])  # Reduced for CPU safety
+        
+        # Physical Batch Size (SAFETY LIMIT: Max 64 to prevent OOM)
+        batch_size = trial.suggest_categorical('batch_size', [32, 64])
+        
+        # Gradient Accumulation (Virtual Batch Size Multiplier)
+        # Simulates larger batches without memory cost
+        # Example: 64 × 4 = 256 effective batch size
+        accumulate_grad_batches = trial.suggest_categorical('accumulate_grad_batches', [1, 2, 4, 8])
+        
         dropout = trial.suggest_float('dropout', 0.0, 0.5)
-        hidden_size = trial.suggest_categorical('hidden_size', [64, 128, 256, 512])
+        
+        # Hidden Size (SAFETY LIMIT: Max 256 to prevent OOM)
+        # 512 REMOVED - Caused Trial 20 crash (168 encoder × 512 hidden = 50M+ params)
+        hidden_size = trial.suggest_categorical('hidden_size', [64, 128, 160, 256])
+        
         weight_decay = trial.suggest_float('weight_decay', 1e-8, 1e-2, log=True)
         
         # ====================================================================
@@ -332,6 +344,7 @@ def objective(
             device=device,
             mixed_precision=config.get('mixed_precision', 'bf16'),
             grad_clip=config.get('grad_clip', 1.0),
+            accumulate_grad_batches=accumulate_grad_batches,  # Anti-OOM: Virtual batch size
             early_stopping=early_stopping,
             checkpoint_dir=None  # No checkpointing during HPO
         )
@@ -462,8 +475,10 @@ def objective(
             win_rate = 0.0
         
         # 6. Inactivity Penalty
-        # Model must trade at least 5% of opportunities
-        min_trades = int(len(predictions) * 0.05)
+        # Model must make at least 15 trades (FIXED THRESHOLD)
+        # Old: 5% of validation set (unfair for large datasets)
+        # New: Absolute minimum (fair for all dataset sizes)
+        min_trades = 15
         
         if num_trades < min_trades:
             # Severely penalize inactive models

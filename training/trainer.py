@@ -13,7 +13,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class SafeTrainer:
-    """Training wrapper with OOM/NaN guards and AMP support."""
+    """Training wrapper with OOM/NaN guards, AMP support, and Gradient Accumulation."""
     
     def __init__(
         self,
@@ -21,7 +21,8 @@ class SafeTrainer:
         device: str = "cuda",
         mixed_precision: str = "bf16",
         grad_clip: float = 1.0,
-        initial_lr: float = 1e-3
+        initial_lr: float = 1e-3,
+        accumulate_grad_batches: int = 1
     ):
         """
         Initialize safe trainer.
@@ -32,11 +33,13 @@ class SafeTrainer:
             mixed_precision: 'bf16', 'fp16', or 'fp32'
             grad_clip: Gradient clipping value
             initial_lr: Initial learning rate
+            accumulate_grad_batches: Number of batches to accumulate gradients before optimizer step
         """
         self.model = model
         self.device = device
         self.grad_clip = grad_clip
         self.initial_lr = initial_lr
+        self.accumulate_grad_batches = max(1, accumulate_grad_batches)
         
         # Mixed precision setup
         self.use_amp = False
@@ -67,10 +70,18 @@ class SafeTrainer:
         batch: Tuple,
         optimizer: torch.optim.Optimizer,
         loss_fn: nn.Module,
-        current_batch_size: int
+        current_batch_size: int,
+        batch_idx: int = 0
     ) -> Tuple[float, bool]:
         """
-        Execute one training step with error handling.
+        Execute one training step with error handling and gradient accumulation.
+        
+        Args:
+            batch: Input batch (x, y)
+            optimizer: PyTorch optimizer
+            loss_fn: Loss function
+            current_batch_size: Current batch size
+            batch_idx: Current batch index (for gradient accumulation)
         
         Returns:
             (loss_value, success)
@@ -84,8 +95,10 @@ class SafeTrainer:
             # Unpack batch
             x, y = batch
             
-            # Forward pass with AMP
-            optimizer.zero_grad()
+            # Zero gradients only on first accumulation step
+            is_accumulating = (batch_idx % self.accumulate_grad_batches) != 0
+            if not is_accumulating:
+                optimizer.zero_grad()
             
             # CRITICAL FIX: Use canonical loss computation if model has loss, otherwise use provided loss_fn
             from utils.model_contracts import compute_tft_loss
@@ -120,19 +133,31 @@ class SafeTrainer:
                 logger.warning(f"NaN/Inf loss detected (incident #{self.nan_incidents})")
                 return float('nan'), False
             
+            # Scale loss for gradient accumulation (normalize by accumulation steps)
+            loss = loss / self.accumulate_grad_batches
+            
             # Backward pass
+            should_step = ((batch_idx + 1) % self.accumulate_grad_batches) == 0
+            
             if self.use_amp and self.scaler is not None:
                 self.scaler.scale(loss).backward()
-                self.scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-                self.scaler.step(optimizer)
-                self.scaler.update()
+                
+                # Only step optimizer every accumulate_grad_batches
+                if should_step:
+                    self.scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    self.scaler.step(optimizer)
+                    self.scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-                optimizer.step()
+                
+                # Only step optimizer every accumulate_grad_batches
+                if should_step:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    optimizer.step()
             
-            return loss.item(), True
+            # Return actual loss (not scaled)
+            return loss.item() * self.accumulate_grad_batches, True
             
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
@@ -160,16 +185,20 @@ def train_with_early_stopping(
     device: str = "cuda",
     mixed_precision: str = "bf16",
     grad_clip: float = 1.0,
+    accumulate_grad_batches: int = 1,
     early_stopping: Optional[Dict] = None,
     checkpoint_dir: Optional[Path] = None
 ) -> Dict:
     """
-    Train model with early stopping and checkpointing.
+    Train model with early stopping, checkpointing, and gradient accumulation.
+    
+    Args:
+        accumulate_grad_batches: Accumulate gradients over N batches (anti-OOM)
     
     Returns:
         Training history dict
     """
-    trainer = SafeTrainer(model, device, mixed_precision, grad_clip)
+    trainer = SafeTrainer(model, device, mixed_precision, grad_clip, accumulate_grad_batches=accumulate_grad_batches)
     
     history = {
         'train_loss': [],
@@ -181,7 +210,9 @@ def train_with_early_stopping(
     }
     
     patience = early_stopping.get('patience', 5) if early_stopping else None
-    min_delta = early_stopping.get('min_delta', 1e-4) if early_stopping else 0.0
+    # CRITICAL FIX: Ensure min_delta is float (may come as string from config)
+    min_delta_raw = early_stopping.get('min_delta', 1e-4) if early_stopping else 0.0
+    min_delta = float(min_delta_raw)
     patience_counter = 0
     
     for epoch in range(epochs):
@@ -189,8 +220,8 @@ def train_with_early_stopping(
         model.train()
         train_losses = []
         
-        for batch in train_loader:
-            loss_val, success = trainer.train_step(batch, optimizer, loss_fn, train_loader.batch_size)
+        for batch_idx, batch in enumerate(train_loader):
+            loss_val, success = trainer.train_step(batch, optimizer, loss_fn, train_loader.batch_size, batch_idx)
             
             if success:
                 train_losses.append(loss_val)
@@ -244,27 +275,32 @@ def train_with_early_stopping(
             avg_val_loss = np.mean(val_losses) if val_losses else float('nan')
             history['val_loss'].append(avg_val_loss)
             
-            # Early stopping check
-            if early_stopping and patience:
-                if avg_val_loss < history['best_val_loss'] - min_delta:
-                    history['best_val_loss'] = avg_val_loss
-                    history['best_epoch'] = epoch
-                    patience_counter = 0
-                    
-                    # Save best model
-                    if checkpoint_dir:
-                        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-                        torch.save({
-                            'epoch': epoch,
-                            'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'val_loss': avg_val_loss,
-                        }, checkpoint_dir / 'best_model.pt')
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        logger.info(f"Early stopping at epoch {epoch}")
-                        break
+            # CRITICAL FIX: Always check for best model and save checkpoint
+            # This works whether early stopping is enabled or not
+            if avg_val_loss < history['best_val_loss'] - min_delta:
+                history['best_val_loss'] = avg_val_loss
+                history['best_epoch'] = epoch
+                patience_counter = 0
+                
+                # Save best model checkpoint (ALWAYS, not just when early stopping)
+                if checkpoint_dir:
+                    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'val_loss': avg_val_loss,
+                    }, checkpoint_dir / 'best_model.pt')
+                    logger.info(f"✅ NEW BEST MODEL: Epoch {epoch+1}, val_loss={avg_val_loss:.6f}")
+            else:
+                patience_counter += 1
+                if early_stopping and patience:
+                    logger.info(f"⚠️  No improvement: patience {patience_counter}/{patience}")
+            
+            # Early stopping check (only if enabled)
+            if early_stopping and patience and patience_counter >= patience:
+                logger.info(f"🛑 EARLY STOPPING at epoch {epoch+1}")
+                break
         else:
             history['val_loss'].append(float('nan'))
         
@@ -276,7 +312,7 @@ def train_with_early_stopping(
     
     # Load best model
     if checkpoint_dir and (checkpoint_dir / 'best_model.pt').exists():
-        checkpoint = torch.load(checkpoint_dir / 'best_model.pt')
+        checkpoint = torch.load(checkpoint_dir / 'best_model.pt', weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         logger.info(f"Loaded best model from epoch {checkpoint['epoch']}")
     

@@ -1,0 +1,26 @@
+{
+  "best_params": {
+    "use_oscillators": false,
+    "use_moving_averages": true,
+    "use_volatility": false,
+    "use_volume": true,
+    "use_patterns": true,
+    "lr": 1.4762487093504197e-05,
+    "batch_size": 64,
+    "accumulate_grad_batches": 2,
+    "dropout": 0.0023322436854185963,
+    "hidden_size": 128,
+    "weight_decay": 6.578829066317018e-08,
+    "max_encoder_length": 72,
+    "max_decoder_length": 1
+  },
+  "best_value": 11.005274052731693,
+  "n_trials": 100,
+  "n_complete": 35,
+  "n_pruned": 65,
+  "n_failed": 0,
+  "duration_seconds": 1846.596251964569,
+  "seed": 42,
+  "metric_name": "negative_mae",
+  "timeframe": "4h"
+}

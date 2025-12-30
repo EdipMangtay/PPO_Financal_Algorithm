@@ -34,7 +34,7 @@ class Signal15m(SignalBase):
     def load_model(self, model_path: str):
         """Load trained 15m TFT model."""
         self.model_path = model_path
-        checkpoint = torch.load(model_path, map_location=self.device)
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
         # Reconstruct model (simplified - in production would need full config)
         self.model = TFTModel(

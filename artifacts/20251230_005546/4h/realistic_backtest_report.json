@@ -1,0 +1,54 @@
+{
+  "metrics": {
+    "initial_balance": 1000.0,
+    "final_balance": 6396.95524710637,
+    "net_profit": 5396.95524710637,
+    "net_profit_pct": 539.6955247106371,
+    "total_return": 6.39695524710637,
+    "total_trades": 1,
+    "winning_trades": 1,
+    "losing_trades": 0,
+    "win_rate": 1.0,
+    "win_rate_pct": 100.0,
+    "total_fees_paid": 2.653222308960014,
+    "fees_pct_of_initial": 0.2653222308960014,
+    "gross_profit": 5397.95524710637,
+    "gross_loss": 0,
+    "profit_factor": Infinity,
+    "avg_win": 5397.95524710637,
+    "avg_loss": 0,
+    "largest_win": 5397.95524710637,
+    "largest_loss": 0,
+    "avg_trade_duration": 651.0,
+    "longest_trade": 651.0,
+    "shortest_trade": 651.0,
+    "max_equity": 9229.748911291754,
+    "max_drawdown": 3090.7883808765782,
+    "max_drawdown_pct": 33.487242292098344,
+    "sharpe_ratio": 0,
+    "expectancy": 5397.95524710637,
+    "leverage_used": 5.0,
+    "position_size_pct": 20.0,
+    "fee_tier": "regular"
+  },
+  "trades_summary": {
+    "total_trades": 1,
+    "first_10_trades": [
+      {
+        "entry_idx": 0,
+        "exit_idx": 651,
+        "type": "long",
+        "entry_price": 57645.0,
+        "exit_price": 95300.0,
+        "position_size": 0.01734755833116489,
+        "pnl_pct": 0.6532223089600139,
+        "leveraged_pnl_pct": 3.2661115448000695,
+        "pnl_usd": 5399.60846941533,
+        "entry_fee": 1.0,
+        "exit_fee": 1.653222308960014,
+        "net_pnl": 5397.95524710637,
+        "balance_after": 6396.95524710637
+      }
+    ]
+  }
+}

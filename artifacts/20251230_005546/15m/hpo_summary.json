@@ -1,0 +1,47 @@
+{
+  "timeframe": "15m",
+  "best_params": {
+    "use_oscillators": false,
+    "use_moving_averages": false,
+    "use_volatility": false,
+    "use_volume": false,
+    "use_patterns": false,
+    "lr": 0.00011531818934843057,
+    "batch_size": 32,
+    "accumulate_grad_batches": 4,
+    "dropout": 0.45998600465332895,
+    "hidden_size": 160,
+    "weight_decay": 0.0008502749951359051,
+    "max_encoder_length": 168,
+    "max_decoder_length": 3
+  },
+  "hpo_results": {
+    "best_params": {
+      "use_oscillators": false,
+      "use_moving_averages": false,
+      "use_volatility": false,
+      "use_volume": false,
+      "use_patterns": false,
+      "lr": 0.00011531818934843057,
+      "batch_size": 32,
+      "accumulate_grad_batches": 4,
+      "dropout": 0.45998600465332895,
+      "hidden_size": 160,
+      "weight_decay": 0.0008502749951359051,
+      "max_encoder_length": 168,
+      "max_decoder_length": 3
+    },
+    "best_value": 70.54940862694022,
+    "n_trials": 100,
+    "n_complete": 64,
+    "n_pruned": 36,
+    "n_failed": 0,
+    "duration_seconds": 36088.51379585266,
+    "seed": 42,
+    "metric_name": "negative_mae",
+    "timeframe": "15m"
+  },
+  "train_size": 49029,
+  "val_size": 10506,
+  "test_size": 10507
+}

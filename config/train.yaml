@@ -51,6 +51,11 @@ early_stopping:
 
 grad_clip: 1.0
 
+# Gradient Accumulation (Anti-OOM Protection)
+# Simulates larger batch sizes without increasing memory usage
+# Example: batch_size=64 × accumulate_grad_batches=4 = Effective 256 batch
+accumulate_grad_batches: 1  # 1 = disabled (default), 2/4/8 = enabled
+
 # Model architecture (TFT)
 model:
   hidden_size: 128

@@ -1,0 +1,35 @@
+{
+  "run_id": "20251230_005546",
+  "timestamp": "2025-12-30T14:44:06.550811",
+  "coin": "BTC/USDT",
+  "timeframes": [
+    "15m",
+    "1h",
+    "4h"
+  ],
+  "hpo_trials": 100,
+  "seed": 42,
+  "results": {
+    "15m": {
+      "timeframe": "15m",
+      "status": "failed",
+      "error": "'tuple' object has no attribute 'to'"
+    },
+    "1h": {
+      "timeframe": "1h",
+      "status": "failed",
+      "error": "'tuple' object has no attribute 'to'"
+    },
+    "4h": {
+      "timeframe": "4h",
+      "status": "failed",
+      "error": "'tuple' object has no attribute 'to'"
+    }
+  },
+  "successful_timeframes": [],
+  "failed_timeframes": [
+    "15m",
+    "1h",
+    "4h"
+  ]
+}
