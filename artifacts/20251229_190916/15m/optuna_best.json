@@ -1,0 +1,18 @@
+{
+  "best_params": {
+    "lr": 0.0001025350969016849,
+    "batch_size": 32,
+    "dropout": 0.07800932022121826,
+    "hidden_size": 256,
+    "weight_decay": 0.00017718847354806813
+  },
+  "best_value": -0.004541737167164684,
+  "n_trials": 2,
+  "n_complete": 1,
+  "n_pruned": 0,
+  "n_failed": 1,
+  "duration_seconds": 965.8310961723328,
+  "seed": 42,
+  "metric_name": "negative_mae",
+  "timeframe": "15m"
+}

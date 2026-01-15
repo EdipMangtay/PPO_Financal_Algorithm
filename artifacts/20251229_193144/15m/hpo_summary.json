@@ -1,0 +1,31 @@
+{
+  "timeframe": "15m",
+  "best_params": {
+    "lr": 0.0004480975918214954,
+    "batch_size": 128,
+    "dropout": 0.22803499210851796,
+    "hidden_size": 64,
+    "weight_decay": 1.8997763474111273e-08
+  },
+  "hpo_results": {
+    "best_params": {
+      "lr": 0.0004480975918214954,
+      "batch_size": 128,
+      "dropout": 0.22803499210851796,
+      "hidden_size": 64,
+      "weight_decay": 1.8997763474111273e-08
+    },
+    "best_value": -0.004265391384251416,
+    "n_trials": 46,
+    "n_complete": 13,
+    "n_pruned": 32,
+    "n_failed": 1,
+    "duration_seconds": 2410.786528110504,
+    "seed": 42,
+    "metric_name": "negative_mae",
+    "timeframe": "15m"
+  },
+  "train_size": 6029,
+  "val_size": 1292,
+  "test_size": 1293
+}

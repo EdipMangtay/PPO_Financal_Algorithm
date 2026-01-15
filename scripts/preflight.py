@@ -51,10 +51,11 @@ class PreflightChecker:
             except ImportError:
                 errors.append(f"Missing package: {pkg}")
         
-        # CUDA if requested
+        # CUDA if requested (warn but don't block - will fallback to CPU)
         if self.config.get('device', 'cuda') == 'cuda':
             if not torch.cuda.is_available():
-                errors.append("CUDA requested but not available")
+                logger.warning("CUDA requested but not available - will use CPU")
+                # Don't add to errors - allow fallback to CPU
         
         return len(errors) == 0, errors
     

@@ -100,6 +100,9 @@ def process_timeframe_hpo(
         
         if preflight_result == "BLOCKED":
             logger.error(f"Preflight BLOCKED for {timeframe}")
+            logger.error("Preflight errors:")
+            for error in checker.errors:
+                logger.error(f"  - {error}")
             return None
         
         # Load data
