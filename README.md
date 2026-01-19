@@ -687,6 +687,7 @@ Her run için `artifacts/{run_id}/{timeframe}/` altında:
 ---
 
 ## 8. ÇALIŞTIRMA KOMUTLARI
+--- environment : C:\venv_ppo\Scripts\Activate.ps1
 
 ### Ana Pipeline (Önerilen)
 
